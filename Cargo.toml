@@ -5,6 +5,8 @@ members = [
     "webview/core",
     "webview/bridge",
     "webview/engine",
+    "webview/runtime",
+
     "components/svg",
     "components/xpath",
     "ffi/capi",

@@ -120,9 +120,24 @@ impl Request {
                 ));
             },
         };
-        let id = value
-            .get("id")
-            .and_then(|value| serde_json::from_value::<Id>(value.clone()).ok());
+        let (id, invalid_id) = match value.get("id") {
+            None => (None, false),
+            Some(Value::String(id)) => (Some(Id::Text(id.clone())), false),
+            Some(Value::Number(id)) => match id.as_u64() {
+                Some(id) => (Some(Id::Number(id)), false),
+                None => (None, true),
+            },
+            Some(_) => (None, true),
+        };
+        if invalid_id {
+            return Err(Reply::error(
+                None,
+                ErrorObject::rpc(
+                    rpc::INVALID_REQUEST,
+                    "`id` must be a non-negative integer or string",
+                ),
+            ));
+        }
         if value.get("jsonrpc").and_then(Value::as_str) != Some(JSON_RPC) {
             return Err(Reply::error(
                 id,
@@ -236,6 +251,30 @@ impl Request {
         };
         Ok(call)
     }
+}
+
+/// Parse and dispatch one JSON-RPC message. The callback must run on the engine thread and
+/// return a concrete result or model error for every `Call`; no method is silently accepted.
+/// Notifications are dispatched but never produce a response.
+pub fn handle_json_rpc<F>(raw: &str, mut dispatch: F) -> Option<String>
+where
+    F: FnMut(Call) -> Result<Value, EgoError>,
+{
+    let request = match Request::parse(raw) {
+        Ok(request) => request,
+        Err(reply) => return Some(reply.to_json()),
+    };
+    let id = request.id.clone();
+    let call = match request.call() {
+        Ok(call) => call,
+        Err(error) => return id.map(|id| Reply::error(Some(id), error).to_json()),
+    };
+    let result = dispatch(call).map_err(|error| ErrorObject::ego(&error));
+    id.map(|id| match result {
+        Ok(result) => Reply::ok(id, result),
+        Err(error) => Reply::error(Some(id), error),
+    }
+    .to_json())
 }
 
 /// Les appels de la v1. `useTaskSpace` (ego) n'a pas d'équivalent ici : chez ego il choisit le
