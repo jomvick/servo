@@ -1,6 +1,13 @@
 # ego-lite sur fork Servo — Plan d'implémentation
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> Plan exploratoire historique. Le fonctionnement livré est décrit dans
+> [`../../../webview/README.md`](../../../webview/README.md) et les décisions
+> courantes dans [`../../adr/0001-architecture.md`](../../adr/0001-architecture.md).
+> Les crates vivent sous `webview/`, le shell utilise GPUI/GPUI Platform aux
+> révisions Komet, Servo vit sur son thread dédié et le transport local est HTTP
+> JSON-RPC. Le canal CDP reste explicitement indisponible ; les snapshots
+> signalent les frames cross-origin inaccessibles plutôt que de prétendre les lire.
+> Les cases ci-dessous conservent le découpage initial, pas un état de livraison.
 
 **Goal:** Construire ego-lite (navigateur pour agents : Spaces parallèles, snapshot de page, API `ego.*`) en modifiant directement un fork de Servo, avec une UI gpui (stack komet), Linux d'abord, intégrable plus tard comme panneau navigateur dans komet.
 
@@ -19,7 +26,7 @@
 - Linux x86_64 = cible de référence. Code spécifique plateforme derrière `#[cfg(target_os = …)]` ; macOS/Windows doivent compiler.
 - Toute erreur exposée porte un code `EGO_*` de la liste publiée par ego (`docs/native-bindings-api.md`, upstream ego-lite) : `EGO_TASK_SPACE_NOT_FOUND`, `EGO_TASK_SPACE_USER_IN_CONTROL`, `EGO_WEB_CONTENTS_UNAVAILABLE`, `EGO_SNAPSHOT_FAILED`, `EGO_INVALID_ARGUMENT`, `EGO_TASK_HOST_DISCONNECTED`, `EGO_OPERATION_FAILED`, `EGO_CDP_CHANNEL_UNAVAILABLE`.
 - Noms publics identiques à ego : `snapshot`, `createTab`, `listTabs`, `useTaskSpace`, `listTaskSpaces`, `createTaskSpace`, `claimTaskSpace`, `handOffTaskSpace`, `takeOverTaskSpace`, `completeTaskSpace`, `closeTaskSpace` (camelCase JSON/JS, snake_case Rust).
-- Un seul thread pour Servo, le `Registry` et gpui (aucun des trois n'est `Send`). Le pont réseau vit sur un thread tokio séparé.
+- Servo, le `Registry` et les contextes de rendu restent sur un thread moteur dédié ; GPUI reste sur le thread principal. Seuls des commandes, du JSON et des `Arc<RgbaImage>` traversent cette frontière. Le pont réseau utilise Tokio.
 - Chaque tâche se termine par `cargo fmt --all --check && cargo clippy -p <crate> -- -D warnings && cargo test -p <crate>`, puis un commit Conventional Commits.
 - Pas de binaires CEF/Chromium : le moteur est Servo, point.
 

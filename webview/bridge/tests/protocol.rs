@@ -256,6 +256,65 @@ fn a_malformed_envelope_is_rejected_with_the_id_when_it_can_be_read() {
 }
 
 #[test]
+fn request_ids_follow_json_rpc_types() {
+    for raw in [
+        r#"{"jsonrpc":"2.0","id":true,"method":"ego.listProfiles"}"#,
+        r#"{"jsonrpc":"2.0","id":[],"method":"ego.listProfiles"}"#,
+        r#"{"jsonrpc":"2.0","id":{},"method":"ego.listProfiles"}"#,
+    ] {
+        let reply = Request::parse(raw).unwrap_err();
+        assert_eq!(reply_error_code(&reply), rpc::INVALID_REQUEST, "{raw}");
+        assert!(matches!(reply, Reply::Failure { id: None, .. }), "{raw}");
+    }
+
+    for id in [json!(null), json!(-1), json!(1.5), json!(u64::MAX)] {
+        let raw = json!({"jsonrpc":"2.0","id":id,"method":"ego.listProfiles"}).to_string();
+        let request = Request::parse(&raw).unwrap();
+        assert_eq!(serde_json::to_value(request.id.unwrap()).unwrap(), id);
+        let reply = webview_bridge::protocol::handle_json_rpc(&raw, |_| Ok(json!([]))).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap()["id"],
+            id
+        );
+    }
+
+    assert_eq!(
+        Request::parse(r#"{"jsonrpc":"2.0","id":"","method":"ego.listProfiles"}"#)
+            .unwrap()
+            .id,
+        Some(Id::Text(String::new()))
+    );
+    assert_eq!(
+        Request::parse(r#"{"jsonrpc":"2.0","id":0,"method":"ego.listProfiles"}"#)
+            .unwrap()
+            .id,
+        Some(Id::Number(0))
+    );
+}
+
+#[test]
+fn scalar_params_are_invalid_requests_and_notification_failures_stay_silent() {
+    for params in ["null", "true", "7", r#""text""#] {
+        let raw = format!(
+            r#"{{"jsonrpc":"2.0","id":"x","method":"ego.listProfiles","params":{params}}}"#
+        );
+        let reply = Request::parse(&raw).unwrap_err();
+        assert_eq!(reply_error_code(&reply), rpc::INVALID_REQUEST, "{raw}");
+    }
+
+    let called = std::cell::Cell::new(false);
+    let response = webview_bridge::protocol::handle_json_rpc(
+        r#"{"jsonrpc":"2.0","method":"ego.createTaskSpace"}"#,
+        |_| {
+            called.set(true);
+            Ok(json!(null))
+        },
+    );
+    assert!(response.is_none());
+    assert!(!called.get());
+}
+
+#[test]
 fn an_ego_error_keeps_its_published_code() {
     let error = EgoError::new(
         ErrorCode::TaskSpaceUserInControl,

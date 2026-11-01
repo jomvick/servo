@@ -1,0 +1,20 @@
+[package]
+name = "webview-ui"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+gpui = { git = "https://github.com/jomvick/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a" }
+gpui_platform = { git = "https://github.com/jomvick/zed", rev = "e2ddcc6805f8c5088e62a60dfe517abcccd61a9a", features = [
+    "wayland",
+    "x11",
+    "font-kit",
+    "runtime_shaders",
+] }
+image.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+webview-runtime = { path = "../runtime" }

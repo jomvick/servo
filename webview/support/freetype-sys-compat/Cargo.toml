@@ -1,0 +1,10 @@
+[package]
+name = "freetype-sys"
+version = "0.20.1"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "Compatibility facade: Komet's GPUI and Servo share one FreeType binding"
+
+[dependencies]
+freetype-sys-current = { package = "freetype-sys", version = "0.23" }

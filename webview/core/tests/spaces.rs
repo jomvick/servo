@@ -112,3 +112,30 @@ fn the_engine_writes_what_it_observes_on_a_tab() {
         ErrorCode::WebContentsUnavailable
     );
 }
+
+#[test]
+fn user_can_open_tabs_after_handoff_but_not_after_completion() {
+    let (mut registry, space) = registry_with_space();
+    registry.hand_off(space).unwrap();
+    let tab = registry
+        .create_user_tab(space, Some("about:blank".into()))
+        .unwrap();
+    assert_eq!(registry.tab(tab).unwrap().space, space);
+    assert_eq!(
+        registry.create_tab(space, None).unwrap_err().code,
+        ErrorCode::TaskSpaceUserInControl
+    );
+    registry.take_over(space).unwrap();
+    registry.complete(space).unwrap();
+    assert_eq!(
+        registry.create_user_tab(space, None).unwrap_err().code,
+        ErrorCode::TaskSpaceInactive
+    );
+    assert_eq!(
+        registry
+            .create_user_tab(SpaceId(u64::MAX), None)
+            .unwrap_err()
+            .code,
+        ErrorCode::TaskSpaceNotFound
+    );
+}

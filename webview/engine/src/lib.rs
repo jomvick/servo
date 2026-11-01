@@ -9,20 +9,26 @@ mod delegate;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::fs::{File, OpenOptions};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, Thread};
 use std::time::{Duration, Instant};
 
 use dpi::PhysicalSize;
 use embedder_traits::EventLoopWaker;
 use euclid::default::Point2D;
+use fs2::FileExt;
 use image::RgbaImage;
 use paint_api::rendering_context::{RenderingContext, SoftwareRenderingContext};
 use serde_json::{Map, Value};
 use servo::{
-    DeviceIntRect, InputEvent, JSValue, JavaScriptEvaluationError, Servo, ServoBuilder,
-    UserContentManager, UserScript, WebView, WebViewBuilder,
+    Code, DeviceIntRect, DevicePoint, InputEvent, JSValue, JavaScriptEvaluationError, Key,
+    KeyState, KeyboardEvent, MouseButton, MouseButtonAction, MouseButtonEvent, Opts, Servo,
+    ServoBuilder, UserContentManager, UserScript, WebView, WebViewBuilder, WheelDelta, WheelEvent,
+    WheelMode,
 };
 use url::Url;
 use webview_core::{EgoError, ErrorCode, ProfileId, Registry, SpaceId, TabId};
@@ -37,12 +43,15 @@ const EVALUATE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct EngineConfig {
     /// Taille d'un onglet neuf. Un `resize(0, 0)` ne l'écrase pas.
     pub viewport: (u32, u32),
+    /// Dossier de profil Servo. `None` conserve le comportement temporaire de Servo.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             viewport: (1280, 800),
+            data_dir: None,
         }
     }
 }
@@ -87,16 +96,68 @@ pub struct Engine {
     registry: Registry,
     tabs: HashMap<TabId, Tab>,
     events: Rc<RefCell<VecDeque<EngineEvent>>>,
+    pending_events: VecDeque<EngineEvent>,
     user_content_manager: Rc<UserContentManager>,
     wakeup: Arc<AtomicBool>,
+    _profile_lock: Option<File>,
     viewport: (u32, u32),
 }
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Result<Self, EgoError> {
+        if rustls::crypto::CryptoProvider::get_default().is_none() {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        }
         let wakeup = Arc::new(AtomicBool::new(false));
-        let servo = ServoBuilder::default()
-            .event_loop_waker(Box::new(Waker(wakeup.clone())))
+        let profile_lock = if let Some(data_dir) = config.data_dir.as_ref() {
+            std::fs::create_dir_all(data_dir).map_err(|error| {
+                EgoError::new(
+                    ErrorCode::OperationFailed,
+                    format!(
+                        "could not create profile directory {}: {error}",
+                        data_dir.display()
+                    ),
+                )
+            })?;
+            let lock_path = data_dir.join(".webview-engine.lock");
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|error| {
+                    EgoError::new(
+                        ErrorCode::OperationFailed,
+                        format!(
+                            "could not open profile lock {}: {error}",
+                            lock_path.display()
+                        ),
+                    )
+                })?;
+            FileExt::try_lock_exclusive(&lock).map_err(|error| {
+                EgoError::new(
+                    ErrorCode::OperationFailed,
+                    format!(
+                        "profile is already in use at {}: {error}",
+                        data_dir.display()
+                    ),
+                )
+            })?;
+            Some(lock)
+        } else {
+            None
+        };
+
+        let mut builder = ServoBuilder::default();
+        if let Some(data_dir) = config.data_dir {
+            builder = builder.opts(Opts {
+                config_dir: Some(data_dir),
+                ..Opts::default()
+            });
+        }
+        let servo = builder
+            .event_loop_waker(Box::new(Waker(wakeup.clone(), thread::current())))
             .build();
         Ok(Self {
             user_content_manager: Rc::new(UserContentManager::new(&servo)),
@@ -104,7 +165,9 @@ impl Engine {
             registry: Registry::default(),
             tabs: HashMap::new(),
             events: Rc::new(RefCell::new(VecDeque::new())),
+            pending_events: VecDeque::new(),
             wakeup,
+            _profile_lock: profile_lock,
             viewport: config.viewport,
         })
     }
@@ -132,11 +195,39 @@ impl Engine {
     }
 
     pub fn create_tab(&mut self, space: SpaceId, url: Option<&str>) -> Result<TabId, EgoError> {
+        self.create_tab_for(space, url, false)
+    }
+
+    pub fn create_user_tab(
+        &mut self,
+        space: SpaceId,
+        url: Option<&str>,
+    ) -> Result<TabId, EgoError> {
+        self.create_tab_for(space, url, true)
+    }
+
+    fn create_tab_for(
+        &mut self,
+        space: SpaceId,
+        url: Option<&str>,
+        user: bool,
+    ) -> Result<TabId, EgoError> {
         let parsed = url.map(parse_url).transpose()?;
-        let tab = self.registry.create_tab(space, url.map(str::to_owned))?;
+        let tab = if user {
+            self.registry
+                .create_user_tab(space, url.map(str::to_owned))?
+        } else {
+            self.registry.create_tab(space, url.map(str::to_owned))?
+        };
 
         let (width, height) = self.viewport;
-        let context = rendering_context((width, height))?;
+        let context = match rendering_context((width, height)) {
+            Ok(context) => context,
+            Err(error) => {
+                let _ = self.registry.close_tab(tab);
+                return Err(error);
+            },
+        };
         let dirty = Rc::new(Cell::new(false));
         let delegate = Rc::new(TabDelegate {
             tab,
@@ -188,6 +279,80 @@ impl Engine {
 
     pub fn input(&mut self, tab: TabId, event: InputEvent) -> Result<(), EgoError> {
         self.webview(tab)?.notify_input_event(event);
+        Ok(())
+    }
+
+    pub fn pointer_click(&mut self, tab: TabId, x: f32, y: f32) -> Result<(), EgoError> {
+        let point = DevicePoint::new(x, y).into();
+        self.input(
+            tab,
+            InputEvent::MouseButton(MouseButtonEvent::new(
+                MouseButtonAction::Down,
+                MouseButton::Primary,
+                point,
+            )),
+        )?;
+        self.input(
+            tab,
+            InputEvent::MouseButton(MouseButtonEvent::new(
+                MouseButtonAction::Up,
+                MouseButton::Primary,
+                point,
+            )),
+        )
+    }
+
+    pub fn scroll(
+        &mut self,
+        tab: TabId,
+        x: f32,
+        y: f32,
+        delta_x: f32,
+        delta_y: f32,
+    ) -> Result<(), EgoError> {
+        self.input(
+            tab,
+            InputEvent::Wheel(WheelEvent::new(
+                WheelDelta {
+                    x: -delta_x as f64,
+                    y: -delta_y as f64,
+                    z: 0.0,
+                    mode: WheelMode::DeltaPixel,
+                },
+                DevicePoint::new(x, y).into(),
+            )),
+        )
+    }
+
+    pub fn text_input(&mut self, tab: TabId, text: &str) -> Result<(), EgoError> {
+        for character in text.chars() {
+            self.dispatch_key(tab, Key::Character(character.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub fn key_input(&mut self, tab: TabId, key: &str) -> Result<(), EgoError> {
+        let key = key
+            .parse::<Key>()
+            .unwrap_or_else(|_| Key::Character(key.to_owned()));
+        self.dispatch_key(tab, key)
+    }
+
+    fn dispatch_key(&mut self, tab: TabId, key: Key) -> Result<(), EgoError> {
+        for state in [KeyState::Down, KeyState::Up] {
+            self.input(
+                tab,
+                InputEvent::Keyboard(KeyboardEvent::new_without_event(
+                    state,
+                    key.clone(),
+                    Code::Unidentified,
+                    servo::Location::Standard,
+                    servo::Modifiers::empty(),
+                    false,
+                    false,
+                )),
+            )?;
+        }
         Ok(())
     }
 
@@ -274,10 +439,8 @@ impl Engine {
     /// Faire avancer le moteur, puis rendre les images que le moteur annonce comme sales.
     /// C'est l'horloge de l'affichage : qui appelle `pump` décide de la cadence.
     pub fn pump(&mut self) {
+        self.wakeup.swap(false, Ordering::AcqRel);
         self.servo.spin_event_loop();
-        if self.waked() {
-            self.wakeup.store(false, Ordering::Relaxed);
-        }
 
         let queue = self.events.clone();
         let mut painted: Vec<(TabId, Option<RgbaImage>)> = Vec::new();
@@ -308,7 +471,8 @@ impl Engine {
     /// à la fin de chaque `pump` : c'est là que l'URL, le titre et l'état de chargement sont
     /// recopiés dans le `Registry`.
     fn sync_registry(&mut self) {
-        for event in self.events.borrow().iter() {
+        let events: Vec<_> = self.events.borrow_mut().drain(..).collect();
+        for event in &events {
             match event {
                 EngineEvent::UrlChanged { tab, url } => {
                     if let Ok(entry) = self.registry.tab_mut(*tab) {
@@ -326,15 +490,28 @@ impl Engine {
                         entry.loading = !complete;
                     }
                 },
-                EngineEvent::Frame { .. }
-                | EngineEvent::Closed { .. }
-                | EngineEvent::Crashed { .. } => {},
+                EngineEvent::Frame { .. } => {},
+                EngineEvent::Closed { tab } | EngineEvent::Crashed { tab, .. } => {
+                    if self.registry.tab(*tab).is_ok() {
+                        let _ = self.registry.close_tab(*tab);
+                    }
+                    self.tabs.remove(tab);
+                },
             }
+        }
+        for event in events {
+            if let EngineEvent::Frame { tab, .. } = &event {
+                self.pending_events.retain(
+                    |old| !matches!(old, EngineEvent::Frame { tab: old_tab, .. } if old_tab == tab),
+                );
+            }
+            self.pending_events.push_back(event);
         }
     }
 
     pub fn take_events(&mut self) -> Vec<EngineEvent> {
-        self.events.borrow_mut().drain(..).collect()
+        self.sync_registry();
+        self.pending_events.drain(..).collect()
     }
 
     fn webview(&self, tab: TabId) -> Result<WebView, EgoError> {
@@ -417,7 +594,7 @@ fn frame_rect(size: (u32, u32)) -> DeviceIntRect {
 }
 
 #[derive(Clone)]
-struct Waker(Arc<AtomicBool>);
+struct Waker(Arc<AtomicBool>, Thread);
 
 impl EventLoopWaker for Waker {
     fn clone_box(&self) -> Box<dyn EventLoopWaker> {
@@ -425,6 +602,72 @@ impl EventLoopWaker for Waker {
     }
 
     fn wake(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0.store(true, Ordering::Release);
+        self.1.unpark();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_apply_once_frames_coalesce_and_profile_stays_locked() {
+        let profile =
+            std::env::temp_dir().join(format!("servo-engine-unit-{}", std::process::id()));
+        let config = EngineConfig {
+            data_dir: Some(profile.clone()),
+            ..EngineConfig::default()
+        };
+        let mut engine = Engine::new(config.clone()).unwrap();
+        assert!(
+            Engine::new(config).is_err(),
+            "a second engine must not share a live profile"
+        );
+        let space = engine.create_space("events", ProfileId("default".into()));
+        let tab = engine.registry.create_tab(space, None).unwrap();
+        engine.push(EngineEvent::TitleChanged {
+            tab,
+            title: "first".into(),
+        });
+        engine.sync_registry();
+        engine.registry.tab_mut(tab).unwrap().title = Some("newer".into());
+        engine.sync_registry();
+        assert_eq!(
+            engine.registry.tab(tab).unwrap().title.as_deref(),
+            Some("newer")
+        );
+        for value in [10, 20] {
+            engine.push(EngineEvent::Frame {
+                tab,
+                image: Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([value, 0, 0, 255]))),
+            });
+            engine.sync_registry();
+        }
+        let events = engine.take_events();
+        let frames: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::Frame { image, .. } => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].get_pixel(0, 0).0[0], 20);
+        engine.push(EngineEvent::Crashed {
+            tab,
+            reason: "fixture".into(),
+        });
+        engine.sync_registry();
+        assert!(engine.registry.tab(tab).is_err());
+        drop(engine);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(profile.join(".webview-engine.lock"))
+            .unwrap();
+        FileExt::try_lock_exclusive(&lock).unwrap();
+        drop(lock);
+        std::fs::remove_dir_all(profile).unwrap();
     }
 }

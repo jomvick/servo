@@ -3,6 +3,11 @@ use serde_json::Value;
 
 use crate::{EgoError, ErrorCode};
 
+const MAX_SNAPSHOT_NODES: usize = 20_000;
+const MAX_SNAPSHOT_FRAMES: usize = 256;
+const MAX_SNAPSHOT_DEPTH: usize = 64;
+const MAX_FIELD_CHARS: usize = 512;
+
 /// Ce que l'agent demande : une représentation texte de la page, bornée en taille.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct SnapshotOptions {
@@ -44,15 +49,21 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
     let frames = frames_of(raw)?;
     let mut lines: Vec<String> = Vec::new();
     let mut refs: Vec<RefEntry> = Vec::new();
+    let mut visited = 0;
 
-    for (i, frame) in frames.iter().enumerate() {
+    for (i, frame) in frames.iter().take(MAX_SNAPSHOT_FRAMES).enumerate() {
         let path = string_field(frame, "path").ok_or_else(|| {
             EgoError::new(
                 ErrorCode::SnapshotFailed,
                 format!("frame {i} carries no `path`, its refs would be unaddressable"),
             )
         })?;
-        let depth = frame.get("depth").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let depth = frame
+            .get("depth")
+            .and_then(Value::as_u64)
+            .and_then(|depth| usize::try_from(depth).ok())
+            .unwrap_or(0)
+            .min(MAX_SNAPSHOT_DEPTH);
         let indent = "  ".repeat(depth);
 
         if frame.get("timeout").and_then(Value::as_bool) == Some(true) {
@@ -63,13 +74,25 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
         let Some(nodes) = frame.get("nodes").and_then(Value::as_array) else {
             continue;
         };
-        for node in nodes {
-            walk(node, &path, depth, options, &mut lines, &mut refs);
+        if walk(
+            nodes,
+            &path,
+            depth,
+            options,
+            &mut lines,
+            &mut refs,
+            &mut visited,
+        ) {
+            lines.push(format!("{indent}[snapshot truncated by traversal limit]"));
+            break;
         }
     }
+    if frames.len() > MAX_SNAPSHOT_FRAMES {
+        lines.push("[snapshot truncated by frame limit]".to_owned());
+    }
 
-    let title = string_field(raw, "title").unwrap_or_default();
-    let url = string_field(raw, "url").unwrap_or_default();
+    let title = sanitize(&string_field(raw, "title").unwrap_or_default());
+    let url = sanitize(&string_field(raw, "url").unwrap_or_default());
     let text = render(&title, &url, &lines, options.max_chars);
     Ok(Snapshot {
         title,
@@ -80,70 +103,116 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
 }
 
 fn walk(
-    node: &Value,
+    roots: &[Value],
     frame: &str,
     depth: usize,
     options: &SnapshotOptions,
     lines: &mut Vec<String>,
     refs: &mut Vec<RefEntry>,
-) {
-    let role = string_field(node, "role").unwrap_or_else(|| "text".to_owned());
-    let name = sanitize(&string_field(node, "name").unwrap_or_default());
-    let unreadable = node.get("unreadable").and_then(Value::as_bool) == Some(true);
-    let reference = string_field(node, "ref").map(|element| format!("{frame}:{element}"));
-    let actionable = reference.is_some();
+    visited: &mut usize,
+) -> bool {
+    let remaining = MAX_SNAPSHOT_NODES.saturating_sub(*visited);
+    if remaining == 0 {
+        return !roots.is_empty();
+    }
+    let mut truncated = roots.len() > remaining;
+    let mut stack: Vec<(&Value, usize)> = roots
+        .iter()
+        .take(remaining)
+        .rev()
+        .map(|node| (node, depth))
+        .collect();
+    while let Some((node, node_depth)) = stack.pop() {
+        if *visited >= MAX_SNAPSHOT_NODES {
+            return true;
+        }
+        *visited += 1;
+        let role = string_field(node, "role").unwrap_or_else(|| "text".to_owned());
+        let name = sanitize(&string_field(node, "name").unwrap_or_default());
+        let unreadable = node.get("unreadable").and_then(Value::as_bool) == Some(true);
+        let reference = string_field(node, "ref").map(|element| format!("{frame}:{element}"));
+        let actionable = reference.is_some();
 
-    if actionable {
-        refs.push(RefEntry {
-            reference: reference.clone().unwrap_or_default(),
-            role: role.clone(),
-            name: name.clone(),
-            frame: frame.to_owned(),
-        });
-    }
+        if actionable {
+            refs.push(RefEntry {
+                reference: reference.clone().unwrap_or_default(),
+                role: role.clone(),
+                name: name.clone(),
+                frame: frame.to_owned(),
+            });
+        }
 
-    // `interactive_only` est le mode « l'agent ne veut que les prises » : le texte non
-    // actionnable sort du rendu. La ligne d'un iframe illisible reste : c'est une information
-    // sur le contenu, pas du contenu, et l'omettre ferait croire à une page plus courte.
-    if options.interactive_only && !actionable && !unreadable {
-        return;
-    }
+        // Omettre la ligne ne doit pas aussi omettre les contrôles descendants.
+        if !options.interactive_only || actionable || unreadable {
+            let indent = "  ".repeat(node_depth);
+            let mut line = format!("{indent}- {role} \"{name}\"");
+            if unreadable {
+                line.push_str(" [unreadable]");
+            }
+            if let Some(reference) = &reference {
+                line.push_str(&format!(" [ref={reference}]"));
+            }
+            if let Some(value) = string_field(node, "value") {
+                line.push_str(&format!(" value=\"{}\"", sanitize(&value)));
+            }
+            lines.push(line);
+        }
 
-    let indent = "  ".repeat(depth);
-    let mut line = format!("{indent}- {role} \"{name}\"");
-    if unreadable {
-        line.push_str(" [unreadable]");
-    }
-    if let Some(reference) = &reference {
-        line.push_str(&format!(" [ref={reference}]"));
-    }
-    if let Some(value) = string_field(node, "value") {
-        line.push_str(&format!(" value=\"{}\"", sanitize(&value)));
-    }
-    lines.push(line);
-
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        for child in children {
-            walk(child, frame, depth + 1, options, lines, refs);
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            if node_depth >= MAX_SNAPSHOT_DEPTH {
+                truncated |= !children.is_empty();
+            } else {
+                let available = MAX_SNAPSHOT_NODES
+                    .saturating_sub(*visited)
+                    .saturating_sub(stack.len());
+                let count = children.len().min(available);
+                truncated |= count < children.len();
+                stack.extend(
+                    children
+                        .iter()
+                        .take(count)
+                        .rev()
+                        .map(|child| (child, node_depth + 1)),
+                );
+            }
         }
     }
+    truncated
 }
 
 /// L'en-tête n'est pas compté dans `max_chars` : c'est quelques dizaines de caractères, et
 /// couper le titre d'une page pour tenir un budget produirait un snapshot sans identifiant.
 fn render(title: &str, url: &str, lines: &[String], max_chars: usize) -> String {
     let mut text = format!("# {title}\n{url}\n");
+    let marker = lines
+        .iter()
+        .find(|line| line.starts_with("[snapshot truncated by"));
     let mut used = 0usize;
     let mut dropped = false;
     for line in lines {
+        if marker.is_some_and(|marker| marker == line) {
+            dropped = true;
+            continue;
+        }
         let cost = line.chars().count() + 1;
-        if used + cost > max_chars {
+        let reserve = marker.map_or(0, |marker| marker.chars().count() + 1);
+        if used.saturating_add(cost).saturating_add(reserve) > max_chars {
             dropped = true;
             break;
         }
         used += cost;
         text.push_str(line);
         text.push('\n');
+    }
+    if let Some(marker) = marker {
+        let cost = marker.chars().count() + 1;
+        if used.saturating_add(cost) <= max_chars {
+            text.push_str(marker);
+            text.push('\n');
+        } else if dropped {
+            text.push_str("…\n");
+        }
+        return text;
     }
     // Marquer la coupe : un agent qui lit les dernières lignes doit savoir que la page
     // continue, sinon il conclut à une fin de document.
@@ -168,7 +237,14 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+        .map(|s| {
+            let mut chars = s.chars();
+            let mut bounded: String = chars.by_ref().take(MAX_FIELD_CHARS).collect();
+            if chars.next().is_some() {
+                bounded.push('…');
+            }
+            bounded
+        })
 }
 
 /// Une ligne par nœud : tout retour chariot d'un texte de page casserait le format.

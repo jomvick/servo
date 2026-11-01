@@ -95,6 +95,21 @@ impl Registry {
 
     pub fn create_tab(&mut self, space: SpaceId, url: Option<String>) -> Result<TabId, EgoError> {
         self.require_agent_control(space)?;
+        self.insert_tab(space, url)
+    }
+
+    pub fn create_user_tab(
+        &mut self,
+        space: SpaceId,
+        url: Option<String>,
+    ) -> Result<TabId, EgoError> {
+        if self.space(space)?.ownership == Ownership::Done {
+            return Err(space_completed(space));
+        }
+        self.insert_tab(space, url)
+    }
+
+    fn insert_tab(&mut self, space: SpaceId, url: Option<String>) -> Result<TabId, EgoError> {
         self.next_tab += 1;
         let id = TabId(self.next_tab);
         self.tabs.insert(

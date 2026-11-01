@@ -63,10 +63,16 @@ Deux pièges d'implémentation, tombés dessus en mesurant, à écrire dans `web
 Voie d'upload validée sans patcher gpui : `RenderImage::new()` prend `impl Into<SmallVec<[image::Frame; 1]>>` (`gpui/src/assets.rs:60`), donc un raster brut suffit — pas d'encodage PNG par frame.
 Contrainte connue de l'upload : `RenderImage::new()` consomme un `ImageId` incrémenté à chaque appel (`gpui/src/assets.rs:61-68`) → une frame = une entrée de sprite atlas, donc RSS monotone, la pathologie déjà documentée chez komet, corrigée chez eux par `Img::evict()` (`gpui/src/elements/img.rs:609`). Deux issues à trancher avec les chiffres : évincer à chaque frame, ou ajouter au fork gpui une « surface externe » persistante.
 
-### D6 — Séparation : quatre crates et un binaire, contrat inverse
-`webview-core` (modèle pur : ids, spaces/tabs/ownership, snapshot, erreurs `EGO_*`), `webview-engine` (adapteur Servo, `PixelSource`/`InputBridge`, profil, préload), `webview-bridge` (pont JSON-RPC local + token), `webview-ui` (vue gpui `BrowserView`, viewModel pur), plus `apps`/`cli` pour le binaire autonome.
-Le contrat qui rend « utilisable hors komet » vérifiable : **aucun crate `webview-*` ne dépend d'un crate `komet-*`**, et komet ne dépend que de `webview-ui`. Contrôlé en CI (`cargo tree -i`), pas par convention de revue. Les tokens visuels de komet sont copiés, pas importés.
-Le plan ego-lite écrivait ces crates `ego/{core,engine,bridge,ui,cli}` ; ils vivent sous `webview/` (décision du user : la brique doit pouvoir servir sans casquette agent). **Seuls les noms de fichiers et de crates changent** : les noms publics restent ceux d'ego (`snapshot`, `createTab`, `claimTaskSpace`, codes `EGO_*`), parce que c'est l'API que les agents connaissent et qu'elle est hors du champ de renommage.
+### D6 — Couches réutilisables, shell autonome facultatif
+
+Six crates vivent sous `webview/` : `webview-core` (modèle pur), `webview-bridge`
+(contrat et scripts), `webview-engine` (adaptateur Servo), `webview-runtime`
+(thread moteur et client `Send`), `webview-ui` (shell GPUI) et `ego-lite`
+(exécutable et serveur local). Aucune ne dépend d'une crate `komet-*`.
+Komet peut intégrer le runtime dans sa propre vue sans lancer une deuxième
+application GPUI ; le binaire autonome réutilise exactement les mêmes couches.
+Le shell épingle les révisions GPUI de Komet ; le runtime ne dépend pas de GPUI.
+Les noms publics `ego.*` restent compatibles avec le contrat existant.
 
 Garde-fou du modèle, écrit dans `webview-core` : la propriété (`Ownership`) ne borne que **les mutations qui donnent du travail à l'agent** — `create_tab` exige `Agent`. Les suppressions (`close_tab`, `close`) ne sont pas gardées, parce que l'utilisateur doit pouvoir fermer un onglet d'un space qu'il tient et l'agent refermer un space qu'il a complété. `Ownership::Done` est terminal pour les quatre opérations de main (`claim`/`hand_off`/`take_over`/`complete` → `EGO_TASK_SPACE_INACTIVE`) mais pas pour `close`. Conséquence mesurable dans les tests : `close` rend les `TabId` supprimés, c'est par là que le moteur libère les `WebView`.
 
@@ -139,7 +145,14 @@ Quatre décisions de rendu qui ne sont pas des détails :
 - **Une notification (pas d'`id`) s'exécute et ne reçoit pas de réponse** ; une enveloppe qui n'est pas du JSON répond avec `id: null`, et une enveloppe mal formée *dont l'`id` est lisible* y répond avec son `id` — sinon l'appelant ne peut rien raccorder.
 - `useTaskSpace` (nom public d'ego) **n'a pas d'équivalent en v1** : chez ego il désigne le space courant de l'agent, ce que le modèle de D6 fait déjà avec `claimTaskSpace`. C'est une divergence assumée avec la liste des noms, pas un oubli.
 
-Ce qui manque encore quand le moteur existera : `serve()` (socket `127.0.0.1`, `Authorization: Bearer`, 401 sinon), le `EngineHandle` avec ses requêtes pendantes et leur timeout de 2 s, et le dispatcher qui applique `require_agent_control` **dans le thread moteur** (Task 7, step 3 du plan) — jamais dans le pont.
+Le transport autonome est HTTP POST JSON-RPC sur loopback, avec un token
+privé (`Authorization: Bearer`), validation de `Host` et rejet des requêtes
+portant `Origin`. Les notifications ne produisent pas de réponse JSON-RPC.
+Le runtime utilise une file bornée à 64 commandes et une échéance de 30 s ;
+une évaluation JavaScript conserve sa propre limite de 10 s. Les commandes
+expirées ne sont pas démarrées. Le dispatcher applique `require_agent_control`
+dans le thread moteur, pas dans le pont. Les commandes `ui.*` ne sont accessibles
+qu'en processus ; le serveur réseau n'expose que `ego.*`.
 
 
 ## Mesure de référence (Phase 0)
@@ -155,7 +168,7 @@ Le fait que ce chiffre sorte d'un **processus de test** et non d'une page n'est 
 
 ## État d'avancement
 
-Il n'est pas dans ce document : un ADR consigne des décisions, pas un avancement. Voir [`../phase0/README.md`](../phase0/README.md) (ce qui est mesuré, ce qui reste ouvert, ordre de reprise, décisions en attente). Les mesures de D5 et de D9 y sont rappelées avec leur commande de reprise (`./docs/phase0/run-probes.sh`, ~30 s de rebuild, ~10 s de mesures).
+Il n'est pas dans ce document : un ADR consigne des décisions, pas un avancement. Voir [`../../webview/README.md`](../../webview/README.md) pour le fonctionnement actuel et [`../phase0/README.md`](../phase0/README.md) pour les mesures historiques. Les mesures de D5 et de D9 y sont rappelées avec leur commande de reprise (`./docs/phase0/run-probes.sh`, ~30 s de rebuild, ~10 s de mesures).
 
 ## Conséquences sur le planning
 

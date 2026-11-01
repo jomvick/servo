@@ -10,9 +10,11 @@ repository.workspace = true
 description = "The Servo adapter of the webview layer: tabs, frames, input, profile."
 
 [dependencies]
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 dpi = { workspace = true }
 embedder_traits = { workspace = true }
 euclid = { workspace = true }
+fs2 = "0.4"
 image = { workspace = true }
 paint_api = { workspace = true }
 serde_json = { workspace = true }

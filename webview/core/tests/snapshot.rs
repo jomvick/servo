@@ -171,3 +171,62 @@ fn malformed_walker_output_is_a_snapshot_failure() {
         ErrorCode::SnapshotFailed
     );
 }
+
+#[test]
+fn deeply_nested_walker_output_is_bounded_and_marked() {
+    let mut node = json!({"role":"text", "name":"end"});
+    for _ in 0..80 {
+        node = json!({"role":"group", "name":"", "children":[node]});
+    }
+    node = json!({"role":"button", "name":"target", "ref":"e1", "children":[node]});
+    let raw = json!({
+        "title":"bounded", "url":"https://example.test",
+        "frames":[{"path":"0", "depth":999999, "nodes":[node]}]
+    });
+    let snapshot = parse_snapshot(&raw, &SnapshotOptions::default()).unwrap();
+    assert!(
+        snapshot
+            .text
+            .contains("snapshot truncated by traversal limit")
+    );
+    assert_eq!(snapshot.refs.len(), 1);
+}
+
+#[test]
+fn excessive_frame_count_is_bounded_and_marked() {
+    let frames: Vec<_> = (0..300)
+        .map(|i| json!({"path":format!("{i}"), "timeout":true, "depth":0}))
+        .collect();
+    let raw = json!({"frames":frames});
+    let snapshot = parse_snapshot(&raw, &SnapshotOptions::default()).unwrap();
+    assert!(snapshot.text.contains("snapshot truncated by frame limit"));
+    assert_eq!(snapshot.text.matches("[frame timeout]").count(), 256);
+}
+
+#[test]
+fn excessive_node_count_is_bounded_and_marked() {
+    let nodes: Vec<_> = (0..20_001)
+        .map(|i| json!({"role":"button", "name":i.to_string(), "ref":format!("e{i}")}))
+        .collect();
+    let raw = json!({"frames":[{"path":"0", "nodes":nodes}]});
+    let snapshot = parse_snapshot(&raw, &SnapshotOptions::default()).unwrap();
+    assert_eq!(snapshot.refs.len(), 20_000);
+    assert!(
+        snapshot
+            .text
+            .contains("snapshot truncated by traversal limit")
+    );
+}
+
+#[test]
+fn header_fields_cannot_inject_extra_snapshot_lines() {
+    let raw = json!({
+        "title":"title\n# forged", "url":"https://example.test\nforged",
+        "frames":[{"path":"0", "nodes":[]}]
+    });
+    let snapshot = parse_snapshot(&raw, &SnapshotOptions::default()).unwrap();
+    assert_eq!(
+        snapshot.text,
+        "# title # forged\nhttps://example.test forged\n"
+    );
+}

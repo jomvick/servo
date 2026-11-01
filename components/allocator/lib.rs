@@ -24,7 +24,9 @@ static ALLOC: crate::tracking::AccountingAlloc<Allocator> =
 // The tracking paths below reach for `crate::ALLOC`, which only exists with a
 // registered global allocator.
 #[cfg(all(feature = "allocation-tracking", not(feature = "global-allocator")))]
-compile_error!("`allocation-tracking` instruments this crate's global allocator; enable `global-allocator` alongside it");
+compile_error!(
+    "`allocation-tracking` instruments this crate's global allocator; enable `global-allocator` alongside it"
+);
 
 #[cfg(feature = "allocation-tracking")]
 mod tracking;
@@ -149,11 +151,17 @@ mod platform {
     /// # Safety
     ///
     /// Passing a non-heap allocated pointer to this function results in undefined behavior.
+    #[cfg(feature = "global-allocator")]
     pub unsafe extern "C" fn usable_size(ptr: *const c_void) -> usize {
         let size = unsafe { tikv_jemallocator::usable_size(ptr) };
         #[cfg(feature = "allocation-tracking")]
         crate::ALLOC.note_allocation(ptr, size);
         size
+    }
+
+    #[cfg(not(feature = "global-allocator"))]
+    pub unsafe extern "C" fn usable_size(_ptr: *const c_void) -> usize {
+        0
     }
 
     /// Memory allocation APIs compatible with libc
@@ -172,6 +180,7 @@ mod platform {
     /// # Safety
     ///
     /// Passing a non-heap allocated pointer to this function results in undefined behavior.
+    #[cfg(feature = "global-allocator")]
     pub unsafe extern "C" fn usable_size(ptr: *const c_void) -> usize {
         #[cfg(target_vendor = "apple")]
         unsafe {
@@ -188,6 +197,11 @@ mod platform {
             crate::ALLOC.note_allocation(ptr, size);
             size
         }
+    }
+
+    #[cfg(not(feature = "global-allocator"))]
+    pub unsafe extern "C" fn usable_size(_ptr: *const c_void) -> usize {
+        0
     }
 
     pub mod libc_compat {
@@ -212,6 +226,7 @@ mod platform {
     /// # Safety
     ///
     /// Passing a non-heap allocated pointer to this function results in undefined behavior.
+    #[cfg(feature = "global-allocator")]
     pub unsafe extern "C" fn usable_size(mut ptr: *const c_void) -> usize {
         unsafe {
             let heap = GetProcessHeap();
@@ -225,6 +240,11 @@ mod platform {
             crate::ALLOC.note_allocation(ptr, size);
             size
         }
+    }
+
+    #[cfg(not(feature = "global-allocator"))]
+    pub unsafe extern "C" fn usable_size(_ptr: *const c_void) -> usize {
+        0
     }
 
     pub fn heap_reports() -> Vec<crate::HeapReport> {

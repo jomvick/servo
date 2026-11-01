@@ -1,0 +1,38 @@
+[package]
+name = "ego-lite"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = ["headed"]
+engine = ["dep:webview-runtime", "dep:rustls"]
+headed = ["engine", "dep:webview-ui"]
+
+[[bin]]
+name = "ego-lite"
+path = "src/main.rs"
+required-features = ["engine"]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+rand = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net"] }
+webview-bridge = { path = "../bridge" }
+webview-runtime = { path = "../runtime", optional = true }
+webview-ui = { path = "../ui", optional = true }
+mimalloc = "0.1"
+rustls = { workspace = true, features = ["aws-lc-rs"], optional = true }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }

@@ -103,7 +103,11 @@ impl Seen {
 
 #[test]
 fn engine_boots_renders_navigates_and_survives_a_zero_resize() {
-    let mut engine = Engine::new(EngineConfig { viewport: VIEWPORT }).expect("moteur");
+    let mut engine = Engine::new(EngineConfig {
+        viewport: VIEWPORT,
+        ..EngineConfig::default()
+    })
+    .expect("moteur");
     let space = engine.create_space("phase1", ProfileId("default".into()));
 
     let page = |colour: &str, title: &str| {

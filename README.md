@@ -14,6 +14,21 @@ Coordination of Servo development happens:
 - On the [Servo Zulip](https://servo.zulipchat.com/)
 - In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
 
+## Komet-compatible browser (this fork)
+
+This fork also provides a reusable Servo runtime and the standalone Rust/GPUI
+browser **ego-lite**, using Komet's pinned GPUI dependencies:
+
+```sh
+./webview/scripts/setup-linux.sh  # Ubuntu 24.04 prerequisites
+cargo run -p ego-lite -- https://example.com
+```
+
+See [webview/README.md](webview/README.md) for the headless application, local
+`ego.*` API, verification commands and future Komet embedding. Build selected
+packages, not `--workspace`, to avoid unifying the two process allocators.
+Upstream Servo and servoshell instructions remain below.
+
 ## Getting started
 
 For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].

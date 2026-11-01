@@ -81,3 +81,9 @@ justfile
 
 # devcontainer
 devcontainer-lock.json
+
+# Local standalone browser profile (cookies, history and RPC token).
+/ego-data/
+
+# Build outputs from directly invoking an individual webview crate.
+/webview/**/target/

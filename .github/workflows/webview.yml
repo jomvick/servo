@@ -1,0 +1,31 @@
+name: Webview contract
+on:
+  pull_request:
+    paths:
+      - 'webview/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/webview.yml'
+  push:
+    branches: [webview]
+    paths:
+      - 'webview/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/webview.yml'
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.1'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --test webview/bridge/tests/automation.test.cjs
+      - run: cargo test --locked -p webview-core -p webview-bridge
+      - run: cargo test --locked -p ego-lite --no-default-features --lib
