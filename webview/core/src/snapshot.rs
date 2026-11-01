@@ -52,7 +52,11 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
                 format!("frame {i} carries no `path`, its refs would be unaddressable"),
             )
         })?;
-        let depth = frame.get("depth").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let depth = frame
+            .get("depth")
+            .and_then(Value::as_u64)
+            .and_then(|depth| usize::try_from(depth).ok())
+            .unwrap_or(0);
         let indent = "  ".repeat(depth);
 
         if frame.get("timeout").and_then(Value::as_bool) == Some(true) {
@@ -63,9 +67,7 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
         let Some(nodes) = frame.get("nodes").and_then(Value::as_array) else {
             continue;
         };
-        for node in nodes {
-            walk(node, &path, depth, options, &mut lines, &mut refs);
-        }
+        walk(nodes, &path, depth, options, &mut lines, &mut refs);
     }
 
     let title = string_field(raw, "title").unwrap_or_default();
@@ -80,51 +82,48 @@ pub fn parse_snapshot(raw: &Value, options: &SnapshotOptions) -> Result<Snapshot
 }
 
 fn walk(
-    node: &Value,
+    roots: &[Value],
     frame: &str,
     depth: usize,
     options: &SnapshotOptions,
     lines: &mut Vec<String>,
     refs: &mut Vec<RefEntry>,
 ) {
-    let role = string_field(node, "role").unwrap_or_else(|| "text".to_owned());
-    let name = sanitize(&string_field(node, "name").unwrap_or_default());
-    let unreadable = node.get("unreadable").and_then(Value::as_bool) == Some(true);
-    let reference = string_field(node, "ref").map(|element| format!("{frame}:{element}"));
-    let actionable = reference.is_some();
+    let mut stack: Vec<(&Value, usize)> = roots.iter().rev().map(|node| (node, depth)).collect();
+    while let Some((node, node_depth)) = stack.pop() {
+        let role = string_field(node, "role").unwrap_or_else(|| "text".to_owned());
+        let name = sanitize(&string_field(node, "name").unwrap_or_default());
+        let unreadable = node.get("unreadable").and_then(Value::as_bool) == Some(true);
+        let reference = string_field(node, "ref").map(|element| format!("{frame}:{element}"));
+        let actionable = reference.is_some();
 
-    if actionable {
-        refs.push(RefEntry {
-            reference: reference.clone().unwrap_or_default(),
-            role: role.clone(),
-            name: name.clone(),
-            frame: frame.to_owned(),
-        });
-    }
+        if actionable {
+            refs.push(RefEntry {
+                reference: reference.clone().unwrap_or_default(),
+                role: role.clone(),
+                name: name.clone(),
+                frame: frame.to_owned(),
+            });
+        }
 
-    // `interactive_only` est le mode « l'agent ne veut que les prises » : le texte non
-    // actionnable sort du rendu. La ligne d'un iframe illisible reste : c'est une information
-    // sur le contenu, pas du contenu, et l'omettre ferait croire à une page plus courte.
-    if options.interactive_only && !actionable && !unreadable {
-        return;
-    }
+        // Omettre la ligne ne doit pas aussi omettre les contrôles descendants.
+        if !options.interactive_only || actionable || unreadable {
+            let indent = "  ".repeat(node_depth);
+            let mut line = format!("{indent}- {role} \"{name}\"");
+            if unreadable {
+                line.push_str(" [unreadable]");
+            }
+            if let Some(reference) = &reference {
+                line.push_str(&format!(" [ref={reference}]"));
+            }
+            if let Some(value) = string_field(node, "value") {
+                line.push_str(&format!(" value=\"{}\"", sanitize(&value)));
+            }
+            lines.push(line);
+        }
 
-    let indent = "  ".repeat(depth);
-    let mut line = format!("{indent}- {role} \"{name}\"");
-    if unreadable {
-        line.push_str(" [unreadable]");
-    }
-    if let Some(reference) = &reference {
-        line.push_str(&format!(" [ref={reference}]"));
-    }
-    if let Some(value) = string_field(node, "value") {
-        line.push_str(&format!(" value=\"{}\"", sanitize(&value)));
-    }
-    lines.push(line);
-
-    if let Some(children) = node.get("children").and_then(Value::as_array) {
-        for child in children {
-            walk(child, frame, depth + 1, options, lines, refs);
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            stack.extend(children.iter().rev().map(|child| (child, node_depth + 1)));
         }
     }
 }
