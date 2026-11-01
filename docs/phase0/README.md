@@ -1,0 +1,77 @@
+# Phase 0 — où on en est et quoi faire à la reprise
+
+Sondes exécutées le 2026-10-31, branche `webview` à `4dfd2701b`, rien de commité ni de poussé. (Mise en attente le 2026-10-30, reprise le 31.)
+
+## Objectif rappelé
+
+Re-travailler Servo dans la stack de komet (gpui/tokio/rust-analyzer) pour (1) l'intégrer dans komet comme section à part entière, (2) le garder utilisable seul et multiplateforme, (3) lui ajouter le pilotage agent repris d'ego-lite. Les quatre décisions d'architecture prises par tirage au sort dirigé : in-process dans le binaire komet, Linux x86_64 d'abord, crates `webview/` dans le workspace Servo, conventions UI copiées sans dépendance aux crates komet. Elles sont détaillées dans [`../adr/0001-architecture.md`](../adr/0001-architecture.md) (D1 à D11).
+
+## Ce qui est fait et vérifié
+
+| Sujet | Résultat | Preuve |
+|---|---|---|
+| Build de référence du fork | `servoshell` compile en **38 min 47 s** (`--no-default-features --features default_base`, donc sans GStreamer), `-j2`, `DEBUG=0`, toolchain épinglée 1.99.1 | binaire 508 Mo, `--version` → `Servo 0.7.0-4dfd2701b`, `target/` = 12 Go (17 Go après les rebuilds de sondes et du patch) |
+| Build avec `--default-features` | **échoue** sur `gstreamer-sys` : paquets système absents | 14 paquets manquants listés depuis `python/servo/platform/linux_packages/dnf_base.txt` |
+| Rendu logiciel sans GPU ni session graphique | **marche** sur cette machine : `servoshell -z -x -o out.png --window-size=1280x800` produit la page attendue (carré rouge sur blanc, vérifié à l'œil) | `/tmp/servo-shot.png` |
+| Coût mémoire d'un moteur in-process | **pic RSS 188 – 198 Mo** (moteur complet + contexte WebRender logiciel + une page), stable sur trois campagnes et les deux sondes ; 197 – 207 Mo pour `servoshell` headless 1280×800 en debug | `/usr/bin/time -v` dans `run-probes.sh` |
+| Contraintes d'upload côté gpui | `RenderImage` est **BGRA** (`gpui/src/assets.rs:45`) et son constructeur accepte des trames brutes (`impl Into<SmallVec<[image::Frame;1]>>`, `:60`) → **pas d'encodage PNG par frame, pas de patch du fork**. Le churn d'`ImageId` reste le seul problème, `Img::evict()` (`img.rs:609`) est le remède déjà utilisé par komet | lecture du checkout `~/.cargo/git/checkouts/zed-d032abea1bc23d84/e2ddcc6` |
+| Portée des `UserScript` dans les iframes | atteint le frame principal et l'iframe **cross-origin**, **pas** l'iframe même origine ni le `srcdoc`. Un parcours `contentWindow.eval` depuis le top atteint exactement l'inverse (les deux manquants, pas le cross-origin). **Les deux mécanismes sont complémentaires, aucun ne couvre les quatre frames** | sonde 2, table `charge= / userscript= / depuis_le_top=` |
+| Coût par frame en rendu logiciel | `paint()` 0,55 – 1,42 ms (500×500) et 0,65 – 1,04 ms (1280×800), **identique à un `paint()` sans rien de sale** ; `read_to_image` 4,07 – 6,46 ms et 6,93 – 10,27 ms ; les deux **127 – 213 img/s** et **90 – 129 img/s**. Ce qui sort des pixels est la lecture, pas le raster | sonde 1, trois campagnes de 3 essais × 20 frames (la 3ᵉ après le patch D3, machine occupée par un build komet) |
+| Latence entrée → image | un défilement à la molette met **11 – 16 ms** à faire l'aller-retour thread peinture → thread script → scène nouvelle, indépendant de la taille. Une frame fraîche répond à un événement ~20 ms plus tôt | sonde 1, colonne `derouler` |
+| Ordre des octets en sortie de `read_to_image` | **RGBA** (`[255, 0, 0, 255]` sur un carré `%23f00`) → le `swap(0, 2)` avant gpui est à payer sur toute la frame | sonde 1, `PROBE-FRAME ordre_des_octets=` |
+
+## Fichiers créés (non suivis par git)
+
+- `docs/adr/0001-architecture.md` — décisions D1-D11 avec citations. D5 et D9 sont maintenant pris **sur mesure**, plus aucun emplacement « EN ATTENTE DE MESURE ».
+- `docs/phase0/README.md`, `docs/phase0/run-probes.sh`, `docs/phase0/0001-allocator-global-allocator.patch` — ce dossier. Le patch est **validé** (`git apply --check` passe sur les trois fichiers) mais **pas appliqué**, pour ne pas invalider le build de mesure.
+- `components/servo/tests/phase0_probe.rs` — les deux sondes, compilées et exécutées. Trois erreurs de méthode corrigées en route, toutes consignées parce qu'elles coûtent cher à découvrir deux fois : un `#` non échappé dans une data URL tronque la feuille de style (`%23`) ; le delegate du harnais amont peint dans `notify_new_frame_ready`, donc chronométrer `paint()` avec ce delegate mesure une non-peinture ; et `Opts` étant un singleton de processus, deux `Servo::new()` dans le même processus paniquent — d'où un processus par test dans `run-probes.sh`.
+- `webview/bridge/src/protocol.rs` + `tests/protocol.rs` — le contrat du pont, écrit avant le moteur : envelope JSON-RPC 2.0, les 21 noms `ego.*` de la v1 typés en `Call`, mapping `EgoError` → `error{code:-32000, message:"EGO_…", data}`. Consigné en D11. Le socket, le token et le dispatcher viennent avec `webview-engine` : ils n'ont rien à exécuter avant.
+- `webview/core/` — la crate du modèle (tâches 2 et 3 de la moitié pure du plan ego-lite). `src/{lib,ids,error,snapshot,space,tab}.rs`, `tests/{snapshot,spaces,wire,workspace}.rs`, `tests/fixtures/snapshot/{form,iframe,hung}.json`. Dépend de `serde` et `serde_json` seulement : ni `servo`, ni gpui, ni tokio.
+- `webview/engine/` — l'adaptateur Servo (tâche 4), dépend de `servo` par chemin : `src/{lib,delegate}.rs`, `tests/tabs.rs`. 177 crates reconstruits en ~8 min, trois warnings préexistants dans `servo` (`GenericSender` inutilisé, `servo-background-hang-monitor`) qui ne viennent pas de ce code.
+- Modifié hors crate : `Cargo.toml` racine (`webview/{core,bridge,engine}` dans `members`) et `Cargo.lock`.
+
+Ce que les sondes ne disent pas : elles tournent en **profil dev** avec llvmpipe sur 4 cœurs. Les chiffres sont un majorant, pas la référence d'un build `--release`. La conclusion D5 tient quand même, parce qu'elle est franchie avec marge même au pire profil.
+
+## À la reprise, dans cet ordre
+
+1. ~~Sondes~~ — fait. `./docs/phase0/run-probes.sh` : rebuild ~30 s (le crate de test seul), les deux mesures en ~9 s. Les lignes `PROBE-FRAME`/`PROBE-FRAMES` sont le rendu ; le script filtre le reste.
+2. ~~Remplir l'ADR~~ — fait : D5 (voie CPU retenue, 90 – 129 img/s à 1280×800 même au pire profil) et D9 (injection **double**, `UserScript` + parcours `contentWindow` depuis le top). Le choix « évincement par frame vs surface externe persistante dans le fork gpui » reste ouvert, mais il ne dépend plus d'une mesure : il dépend du nombre de frames/s que komet voudra afficher.
+3. ~~Patch allocateur~~ — **appliqué et fermé** le 2026-10-31. `git apply` (3 fichiers, 17 insertions), puis les deux moitiés du contrat vérifiées :
+   - `servo-allocator` seul, combinaison par combinaison (`cargo check`) : sans feature ✓, `global-allocator` ✓, `global-allocator + allocation-tracking` ✓, `allocation-tracking` seul → `compile_error!` comme prévu ;
+   - **moteur entier reconstruit feature éteinte** (le chemin hôte, le plus risqué parce que `crate::ALLOC` n'existe plus) : `cargo test -p servo --test phase0_probe` a rebuild `fonts`/`paint`/`malloc_size_of`/`profile` par-dessus et les deux sondes redonnent les mêmes résultats — troisième campagne de D5, chiffrée ci-dessus ;
+   - **chemin servoshell** (feature allumée, binaire strictement équivalent à avant) validé sans reconstruction par `cargo tree -p servoshell -e features --no-default-features --features default_base -i servo-allocator`, qui montre bien `servo-allocator feature "global-allocator"` sous `default_base`.
+   Détail trouvé en relisant le graphe : le seul point du moteur qui traverse l'allocateur du processus est `components/fonts/platform/freetype/library_handle.rs:15`, qui prend `malloc`/`free`/`realloc` **ensemble** depuis `libc_compat` — donc pas de mésalliance quand le gate est éteint, à condition de ne jamais activer `use-jemalloc` sans `global-allocator` (c'est écrit dans D3).
+
+   Reste ouvert, mais ce n'est plus une mesure : la vérification empirique de **D7** (builder `servo` depuis un workspace externe, toolchain `stable`, sans aucun `[env]` repris). Elle se fera toute seule, et au bon moment, quand komet ajoutera `webview-ui` à ses dépendances : c'est exactement ce workspace externe. La construire maintenant avec un crate synthétique coûterait une reconstruction complète du graphe dans un `target/` séparé, pour une réponse que la phase 2 donne gratis.
+
+4. Créer `webview/{core,engine,bridge,ui,cli}` — **`webview/core` est écrit**, tâches 2 et 3 (moitié pure) du plan ego-lite, 18 tests verts, `cargo fmt --check` et `cargo clippy -p webview-core --all-targets -- -D warnings` propres, **aucun crate du moteur reconstruit** :
+   - tâche 2 : ids, `Ownership`, `Space`, `Tab`, `Registry`, `EgoError`/`ErrorCode` en `EGO_*`. Consigné en D6 — les suppressions ne sont pas gardées par la propriété (un utilisateur doit pouvoir fermer un onglet d'un space qu'il tient), `close` rend les `TabId` supprimés parce que c'est par là que le moteur libère les `WebView`, et `close_tab` a été ajouté (absent de la liste de la tâche 2, requis par `Engine::close_tab` de la tâche 4).
+   - tâche 3, le parseur : `SnapshotOptions`, `RefEntry`, `Snapshot`, `parse_snapshot`, trois fixtures `tests/fixtures/snapshot/{form,iframe,hung}.json`. **Le format wire du walker JS est fixé par le parseur, écrit avant le producteur** — c'est D10, et le `ego-preload.js` de `webview-bridge` devra s'y tenir à la lettre. Le plan appelait ça « repli documenté si Servo n'injecte pas dans les iframes » : la sonde a répondu (D9, injection double), donc le parseur a été écrit contre un format, pas contre une hypothèse.
+   - reste de la tâche 3 : le walker JS lui-même. **Pas écrit, volontairement** : 250 lignes de DOM que je ne peux exécuter contre rien, tant que `webview-engine` n'existe pas. Le contrat d'entrée est fixé (D10), c'est ce qui rendra le JS testable en un passage au lieu de dix.
+   - tâche 7, moitié protocole : `webview-bridge` est écrit et testé (8 tests) ; le socket, le Bearer et le dispatcher attendent le moteur.
+   Coût cumulé des deux crates : ~40 s (serde + serde_json + syn), **le graphe du moteur n'a pas bougé** — vérifié à chaque fois par `cargo build -p servo-allocator` : 1,4 s, zéro ligne `Compiling`.
+   Restait à faire hier, fait : le squelette était `"webview/core",` dans `[workspace] members` du `Cargo.toml` racine, seul membre ajouté, crate sans dépendance à l'époque.
+
+5. `webview/engine` — **écrit, compilé et vert** (tâche 4) : `Engine` (un `Servo`, un `SoftwareRenderingContext` **par onglet**, un `UserContentManager` partagé), `EngineConfig { viewport }`, `EngineEvent::{Frame, UrlChanged, TitleChanged, LoadStatusChanged, Closed, Crashed}`, et `create_tab`/`navigate`/`reload`/`go_back`/`go_forward`/`input`/`resize`/`close_tab`/`set_active_tab`/`pump`/`take_events`. Deux choses y viennent directement des mesures :
+   - **la peinture est dans `pump`, pas dans `notify_new_frame_ready`** (D5) : le delegate ne pose qu'un drapeau sale, donc c'est l'appelant qui décide de la cadence ;
+   - **`resize(_, 0, 0)` est ignoré** (point 5 du Review Focus).
+   Le modèle a reçu deux méthodes pour que le moteur écrive ce qu'il observe : `Registry::tab_mut` (URL, titre, chargement, recopiés à la fin de chaque `pump`) et `Registry::set_active_tab`.
+   Coût réel : **~8 min** pour 177 crates, pas les ~40 min annoncées — le `target/` partagé avec `servoshell` et les sondes contenait déjà l'essentiel ; seuls les artefacts dont la combinaison de features change ont été refaits. C'est la vérification de D3 **à l'échelle du moteur entier**, feature éteinte : le chemin hôte, celui que komet emprunte.
+   Le `cargo clippy -p webview-engine --all-targets -- -D warnings` du plan **échoue sur du code amont**, pas sur le nôtre : `-D warnings` s'applique à tous les membres du workspace, et `servo-background-hang-monitor` a deux avertissements préexistants (`process_register`). La bonne invocation sur cet arbre est `--no-deps`, qui lint notre crate seulement et laisse les dépendances à `-W` : verte en 3 min 34 s (les 177 crates sont re-`check`és au passage, sans `-D`).
+   Le test `tests/tabs.rs` est **un seul `#[test]`** : `Opts` est un singleton de processus, donc deux `Engine` dans le même binaire paniquent au second `Servo::new`. Il prouve, en ~0,3 s : démarrage, frame 800×600 avec le bon pixel, titre, navigation, retour, `resize(0, 0)` ignoré, `resize(400, 300)` appliqué, fermeture. Deux pièges mesurés en l'écrivant, tous deux dans le test et non dans le moteur :
+   - **un chargement rend deux frames**, une blanche à ~60 ms puis le contenu à ~105–206 ms. Une fenêtre d'accalmie fixe rate la seconde ; le test attend une **prédicat** (pixel, dimensions) avec échéance, pas une durée de repos. La frame blanche n'est pas un bug : c'est D5, et le moteur l'émet telle quelle.
+   - Le `TitleChanged` arrive **avant toute frame** (~31 ms), et `Engine::take_events` vide la file entière : une aide qui draine en cherchant autre chose jette le titre. Le test garde tous les événements et attend « le dernier titre connu vaut X », ce qui est le contrat réel (le moteur n'envoie que les changements).
+   Une chose vue mais non concluante : sur 3 essais lancés pendant que komet compilait et tournait, un run a passé **60 s sans un seul événement** (même l'URL), puis 8 runs isolés et 8 runs enchaînés ont été verts. Je n'ai pas de mécanisme pour ce stall ; il n'est pas attribuable au moteur sans instrumentation, et le noter vaut mieux que le taire.
+6. Ce qui reste ensuite : le walker JS (tâche 3, maintenant débloqué — le moteur existe et charge du `data:` en 60 ms), l'`evaluate` + injection `UserContentManager` de la tâche 5, le socket et le dispatcher du pont (tâche 7), la vue gpui (tâche 8).
+
+Contrainte de séquence — **mesurée fausse, levée**. Elle disait : toucher le `Cargo.toml` racine invalide les fingerprints des crates qui héritent de `version.workspace = true` et relance une reconstruction longue. Vérification après coup : avec `"webview/core",` d'ajouté à `[workspace] members`, `cargo build -p servo-allocator` — un crate qui hérite bel et bien de la version du workspace — finit en **0,92 s sans une seule ligne `Compiling`**. L'héritage d'une valeur inchangée ne casse pas les caches ; ce qui les casse est une modification de la valeur. Les crates `webview/` peuvent donc être ajoutées au workspace sans rien reconstruire.
+
+## Décisions en attente du user
+
+- Committer ou non `docs/` + `components/servo/tests/phase0_probe.rs` sur `webview` (sans push). Un `git clean` les détruirait.
+- Le dossier `browser/servo/` (3,1 Go) : vérifié, c'est un clone propre de `servo/servo` à `bc481a3d8c3` (le parent de notre HEAD), `git status` vide, aucune branche locale, 1,8 Go de `.git`. Aucun travail unique dedans, donc supprimable et re-clonable — mais il était là avant moi, je ne le supprime pas sans feu vert.
+- `sudo dnf install -y libtool libunwind-devel mesa-libGL-devel mesa-libEGL-devel gperf expat-devel libXmu-devel ncurses-devel python3-devel libjpeg-turbo-devel zlib-ng` (je ne peux pas sudo) pour débloquer le build complet.
+
+## Environnement
+
+7,8 Go RAM, tombés à ~1 Go libre pendant la troisième campagne (un `cargo build --bin komet` concurrent), 4 cœurs, 79 Go libres sur `/dev/sda3` monté sur `/home` (la note de 19 Go datait d'une lecture de partition erronée). Le moteur ne se build pas en parallèle d'autre chose de costaud : `-j2` est un plafond subi, pas un choix.

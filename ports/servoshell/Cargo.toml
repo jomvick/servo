@@ -41,11 +41,14 @@ default_base = [
     "bundled",
     "default_web_features",
     "default_tooling",
+    "global_allocator",
     "jemalloc",
     "max_log_level",
     "multiprocess",
     "js_jit",
 ]
+# Install a process global allocator. An embedder that already owns one omits this.
+global_allocator = ["servo-allocator/global-allocator"]
 # Enable jemalloc on platforms that support it (not OHOS and not Windows).
 jemalloc = ["servo-allocator/use-jemalloc"]
 # Default web features should be kept in sync with the list in servo/Cargo.toml.

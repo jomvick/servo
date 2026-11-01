@@ -6,6 +6,7 @@
 /.wpt
 /.vs
 /target
+/servo/
 /tests/wpt/reftests-report/report.html
 /python/_virtualenv*
 /python/_venv*

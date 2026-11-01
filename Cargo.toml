@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "components/media/examples",
+    "webview/core",
+    "webview/bridge",
+    "webview/engine",
     "components/svg",
     "components/xpath",
     "ffi/capi",
