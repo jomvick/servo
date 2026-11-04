@@ -1,0 +1,58 @@
+--- a/components/allocator/lib.rs
++++ b/components/allocator/lib.rs
+@@ -7,15 +7,25 @@
+ 
+ use std::os::raw::c_void;
+ 
+-#[cfg(not(feature = "allocation-tracking"))]
++// Registering a `#[global_allocator]` is opt-in, so that an embedder which owns the
++// process allocator (komet uses mimalloc) can link the engine without a second
++// registration error. A binary that links the engine as a library must enable this
++// feature to get jemalloc/system allocation back; without it the engine simply falls
++// back to whatever allocator the host process installed.
++#[cfg(all(feature = "global-allocator", not(feature = "allocation-tracking")))]
+ #[global_allocator]
+ static ALLOC: Allocator = Allocator;
+ 
+-#[cfg(feature = "allocation-tracking")]
++#[cfg(all(feature = "global-allocator", feature = "allocation-tracking"))]
+ #[global_allocator]
+ static ALLOC: crate::tracking::AccountingAlloc<Allocator> =
+     crate::tracking::AccountingAlloc::with_allocator(Allocator);
+ 
++// The tracking paths below reach for `crate::ALLOC`, which only exists with a
++// registered global allocator.
++#[cfg(all(feature = "allocation-tracking", not(feature = "global-allocator")))]
++compile_error!("`allocation-tracking` instruments this crate's global allocator; enable `global-allocator` alongside it");
++
+ #[cfg(feature = "allocation-tracking")]
+ mod tracking;
+ 
+--- a/components/allocator/Cargo.toml
++++ b/components/allocator/Cargo.toml
+@@ -14,6 +14,8 @@
+ path = "lib.rs"
+ 
+ [features]
++# Register this crate's allocator as the process `#[global_allocator]`.
++global-allocator = []
+ allocation-tracking = ["backtrace", "dep:rustc-hash", "log"]
+ use-jemalloc = ["dep:tikv-jemalloc-sys", "dep:tikv-jemallocator"]
+ 
+--- a/ports/servoshell/Cargo.toml
++++ b/ports/servoshell/Cargo.toml
+@@ -41,11 +41,14 @@
+     "bundled",
+     "default_web_features",
+     "default_tooling",
++    "global_allocator",
+     "jemalloc",
+     "max_log_level",
+     "multiprocess",
+     "js_jit",
+ ]
++# Install a process global allocator. An embedder that already owns one omits this.
++global_allocator = ["servo-allocator/global-allocator"]
+ # Enable jemalloc on platforms that support it (not OHOS and not Windows).
+ jemalloc = ["servo-allocator/use-jemalloc"]
+ # Default web features should be kept in sync with the list in servo/Cargo.toml.

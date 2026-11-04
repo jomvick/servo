@@ -1,0 +1,27 @@
+{
+  "title": "News",
+  "url": "https://example.test/",
+  "frames": [
+    {
+      "path": "f0",
+      "depth": 0,
+      "nodes": [
+        { "role": "heading", "name": "Top stories" },
+        { "role": "link", "name": "Strike averted at the port", "ref": "e1" },
+        { "role": "link", "name": "Municipal election results", "ref": "e2" },
+        { "role": "text", "name": "Weather, 14 degrees and raining" },
+        { "role": "iframe", "name": "Banner" },
+        { "role": "iframe", "name": "Comments" }
+      ]
+    },
+    { "path": "f1", "depth": 1, "timeout": true },
+    {
+      "path": "f2",
+      "depth": 1,
+      "nodes": [
+        { "role": "textbox", "name": "Write a comment", "ref": "e1" },
+        { "role": "button", "name": "Post", "ref": "e2" }
+      ]
+    }
+  ]
+}

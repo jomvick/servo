@@ -14,6 +14,8 @@ build = "build.rs"
 path = "lib.rs"
 
 [features]
+# Register this crate's allocator as the process `#[global_allocator]`.
+global-allocator = []
 allocation-tracking = ["backtrace", "dep:rustc-hash", "log"]
 use-jemalloc = ["dep:tikv-jemalloc-sys", "dep:tikv-jemallocator"]
 

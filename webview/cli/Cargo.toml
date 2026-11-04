@@ -1,0 +1,18 @@
+[package]
+name = "webview-cli"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+publish = false
+rust-version.workspace = true
+repository.workspace = true
+description = "Standalone Servo browser using the Komet GPUI stack."
+
+[[bin]]
+name = "webview"
+path = "src/main.rs"
+
+[dependencies]
+url = { workspace = true }
+webview-ui = { path = "../ui" }

@@ -1,0 +1,21 @@
+{
+  "title": "Sign up",
+  "url": "https://example.test/signup",
+  "frames": [
+    {
+      "path": "f0",
+      "depth": 0,
+      "nodes": [
+        { "role": "heading", "name": "Create your account" },
+        { "role": "text", "name": "We use your address only to send the receipt." },
+        { "role": "textbox", "name": "Email", "ref": "e1", "value": "a@b.c" },
+        { "role": "checkbox", "name": "Newsletter", "ref": "e2" },
+        { "role": "button", "name": "Save", "ref": "e3" },
+        {
+          "role": "text",
+          "name": "By continuing you accept our terms of service and our privacy policy, and you agree that we may contact you about product changes, billing disputes and the outcome of our occasional surveys about how people use the site."
+        }
+      ]
+    }
+  ]
+}

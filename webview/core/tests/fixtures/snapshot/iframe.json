@@ -1,0 +1,34 @@
+{
+  "title": "Order",
+  "url": "https://example.test/checkout",
+  "frames": [
+    {
+      "path": "f0",
+      "depth": 0,
+      "nodes": [
+        { "role": "heading", "name": "Your order" },
+        { "role": "text", "name": "Two items, 34,90 EUR" },
+        { "role": "iframe", "name": "Checkout" },
+        { "role": "iframe", "name": "Advertisement", "unreadable": true },
+        { "role": "button", "name": "Change address", "ref": "e1" }
+      ]
+    },
+    {
+      "path": "f1",
+      "depth": 1,
+      "nodes": [
+        { "role": "textbox", "name": "Card number", "ref": "e1" },
+        { "role": "combobox", "name": "Country", "ref": "e2", "value": "FR" },
+        { "role": "button", "name": "Pay now", "ref": "e3" }
+      ]
+    },
+    {
+      "path": "f2",
+      "depth": 1,
+      "nodes": [
+        { "role": "text", "name": "Terms shown in a srcdoc frame" },
+        { "role": "link", "name": "Read the terms", "ref": "e1" }
+      ]
+    }
+  ]
+}

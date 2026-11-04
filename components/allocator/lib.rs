@@ -7,14 +7,24 @@
 
 use std::os::raw::c_void;
 
-#[cfg(not(feature = "allocation-tracking"))]
+// Registering a `#[global_allocator]` is opt-in, so that an embedder which owns the
+// process allocator (komet uses mimalloc) can link the engine without a second
+// registration error. A binary that links the engine as a library must enable this
+// feature to get jemalloc/system allocation back; without it the engine simply falls
+// back to whatever allocator the host process installed.
+#[cfg(all(feature = "global-allocator", not(feature = "allocation-tracking")))]
 #[global_allocator]
 static ALLOC: Allocator = Allocator;
 
-#[cfg(feature = "allocation-tracking")]
+#[cfg(all(feature = "global-allocator", feature = "allocation-tracking"))]
 #[global_allocator]
 static ALLOC: crate::tracking::AccountingAlloc<Allocator> =
     crate::tracking::AccountingAlloc::with_allocator(Allocator);
+
+// The tracking paths below reach for `crate::ALLOC`, which only exists with a
+// registered global allocator.
+#[cfg(all(feature = "allocation-tracking", not(feature = "global-allocator")))]
+compile_error!("`allocation-tracking` instruments this crate's global allocator; enable `global-allocator` alongside it");
 
 #[cfg(feature = "allocation-tracking")]
 mod tracking;
