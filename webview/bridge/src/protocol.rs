@@ -189,6 +189,14 @@ impl Request {
                 tab: tab(params)?,
                 url: string(params, "url")?,
             },
+            "goBack" => Call::GoBack { tab: tab(params)? },
+            "goForward" => Call::GoForward { tab: tab(params)? },
+            "reload" => Call::Reload { tab: tab(params)? },
+            "clickAt" => Call::ClickAt {
+                tab: tab(params)?,
+                x: number(params, "x")?,
+                y: number(params, "y")?,
+            },
             "snapshot" => Call::Snapshot {
                 tab: tab(params)?,
                 options: SnapshotOptions {
@@ -276,6 +284,20 @@ pub enum Call {
     Navigate {
         tab: TabId,
         url: String,
+    },
+    GoBack {
+        tab: TabId,
+    },
+    GoForward {
+        tab: TabId,
+    },
+    Reload {
+        tab: TabId,
+    },
+    ClickAt {
+        tab: TabId,
+        x: f64,
+        y: f64,
     },
     Snapshot {
         tab: TabId,
@@ -377,6 +399,10 @@ fn as_f64(params: &Value, key: &str) -> Result<Option<f64>, ErrorObject> {
     }
 }
 
+fn number(params: &Value, key: &str) -> Result<f64, ErrorObject> {
+    as_f64(params, key)?.ok_or_else(|| ErrorObject::invalid_params(format!("`{key}` is required")))
+}
+
 fn bool_or(params: &Value, key: &str, default: bool) -> Result<bool, ErrorObject> {
     Ok(match params.get(key) {
         None | Some(Value::Null) => default,
@@ -406,4 +432,33 @@ fn reference(params: &Value) -> Result<String, ErrorObject> {
     text(params, "reference")?
         .or(text(params, "ref")?)
         .ok_or_else(|| ErrorObject::invalid_params("`ref` is required"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pointer_click_coordinates() {
+        let request = Request::parse(
+            r#"{"jsonrpc":"2.0","id":1,"method":"ego.clickAt","params":{"tab":9,"x":12.5,"y":24}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            request.call().unwrap(),
+            Call::ClickAt {
+                tab: TabId(9),
+                x: 12.5,
+                y: 24.0,
+            }
+        );
+    }
+
+    #[test]
+    fn pointer_click_requires_both_coordinates() {
+        let request =
+            Request::parse(r#"{"jsonrpc":"2.0","method":"ego.clickAt","params":{"tab":9,"x":1}}"#)
+                .unwrap();
+        assert_eq!(request.call().unwrap_err().code, rpc::INVALID_PARAMS);
+    }
 }

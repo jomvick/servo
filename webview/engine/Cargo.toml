@@ -10,11 +10,14 @@ repository.workspace = true
 description = "The Servo adapter of the webview layer: tabs, frames, input, profile."
 
 [dependencies]
+base64 = { workspace = true }
 dpi = { workspace = true }
+dirs = { workspace = true }
 embedder_traits = { workspace = true }
 euclid = { workspace = true }
 image = { workspace = true }
 paint_api = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 servo = { path = "../../components/servo", default-features = false, features = [
     "bundled",
@@ -24,4 +27,5 @@ servo = { path = "../../components/servo", default-features = false, features = 
     "multiprocess",
 ] }
 url = { workspace = true }
+webview-bridge = { path = "../bridge" }
 webview-core = { path = "../core" }

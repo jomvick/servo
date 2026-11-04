@@ -12093,6 +12093,7 @@ version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tungstenite",
  "webview-core",
 ]
 
@@ -12108,14 +12109,18 @@ dependencies = [
 name = "webview-engine"
 version = "0.7.0"
 dependencies = [
+ "base64 0.23.1",
+ "dirs",
  "dpi",
  "euclid",
  "image",
+ "serde",
  "serde_json",
  "servo",
  "servo-embedder-traits",
  "servo-paint-api",
  "url",
+ "webview-bridge",
  "webview-core",
 ]
 

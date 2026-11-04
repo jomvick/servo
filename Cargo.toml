@@ -13,7 +13,7 @@ members = [
     "tests/unit/*",
 ]
 default-members = ["ports/servoshell"]
-exclude = [".cargo", "support/crown"]
+exclude = [".cargo", "support/crown", "webview/ui", "webview/cli"]
 
 [workspace.package]
 version = "0.7.0"

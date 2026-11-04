@@ -12,4 +12,5 @@ description = "Local JSON-RPC face of the webview layer, with the ego.* method n
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tungstenite = { workspace = true }
 webview-core = { path = "../core" }

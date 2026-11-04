@@ -7,8 +7,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use image::RgbaImage;
-use webview_core::{ProfileId, TabId};
+use webview_core::{ProfileId, SnapshotOptions, TabId};
 use webview_engine::{Engine, EngineConfig, EngineEvent};
 
 const VIEWPORT: (u32, u32) = (800, 600);
@@ -103,12 +105,16 @@ impl Seen {
 
 #[test]
 fn engine_boots_renders_navigates_and_survives_a_zero_resize() {
-    let mut engine = Engine::new(EngineConfig { viewport: VIEWPORT }).expect("moteur");
+    let mut engine = Engine::new(EngineConfig {
+        viewport: VIEWPORT,
+        ..EngineConfig::default()
+    })
+    .expect("moteur");
     let space = engine.create_space("phase1", ProfileId("default".into()));
 
     let page = |colour: &str, title: &str| {
         format!(
-            "data:text/html,<title>{title}</title><style>body{{margin:0;background:%23{colour}}}</style><h1>x</h1>"
+            "data:text/html,<title>{title}</title><style>body{{margin:0;background:%23{colour}}}</style><h1>x</h1><button onclick=\"document.body.dataset.clicked='yes'\">Continue</button><input id=\"name\">"
         )
     };
 
@@ -120,12 +126,99 @@ fn engine_boots_renders_navigates_and_survives_a_zero_resize() {
         image.dimensions() == VIEWPORT && px[0] > 200 && px[1] < 60
     });
     assert_eq!((frame.width(), frame.height()), (VIEWPORT.0, VIEWPORT.1));
+    let response = engine
+        .handle_rpc(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "ego.capture",
+                "params": { "tab": tab.0 },
+            })
+            .to_string(),
+        )
+        .expect("capture response");
+    let response: serde_json::Value = serde_json::from_str(&response).expect("JSON-RPC response");
+    let png = STANDARD
+        .decode(response["result"]["data"].as_str().expect("PNG data"))
+        .expect("base64 PNG");
+    let captured = image::load_from_memory(&png).expect("decode PNG");
+    assert_eq!(captured.to_rgba8().dimensions(), VIEWPORT);
     assert!(
         frame.get_pixel(10, 10).0[1] < 60,
         "le rouge attendu n'est pas là : {:?}",
         frame.get_pixel(10, 10).0
     );
     seen.wait_title(&mut engine, tab, "one");
+    let snapshot = engine
+        .snapshot(tab, &SnapshotOptions::default())
+        .expect("snapshot");
+    assert!(snapshot.text.contains("heading"));
+    assert!(snapshot.text.contains("Continue"));
+    assert_eq!(snapshot.refs.len(), 2);
+    assert_eq!(snapshot.refs[0].reference, "f0:e0");
+    engine
+        .click(tab, &snapshot.refs[0].reference)
+        .expect("click");
+    assert_eq!(
+        engine
+            .evaluate(tab, "document.body.dataset.clicked")
+            .unwrap(),
+        serde_json::Value::String("yes".into())
+    );
+    engine
+        .evaluate(tab, "document.body.dataset.clicked='no'")
+        .unwrap();
+    let position = engine
+        .evaluate(
+            tab,
+            "(()=>{const r=document.querySelector('button').getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()",
+        )
+        .unwrap();
+    engine
+        .click_at(
+            tab,
+            position[0].as_f64().unwrap() as f32,
+            position[1].as_f64().unwrap() as f32,
+        )
+        .expect("pointer click");
+    assert_eq!(
+        engine
+            .evaluate(tab, "document.body.dataset.clicked")
+            .unwrap(),
+        serde_json::Value::String("yes".into())
+    );
+    engine
+        .fill(tab, &snapshot.refs[1].reference, "Komet")
+        .expect("fill");
+    assert_eq!(
+        engine
+            .evaluate(tab, "document.querySelector('#name').value")
+            .unwrap(),
+        serde_json::Value::String("Komet".into())
+    );
+    engine
+        .evaluate(
+            tab,
+            "(()=>{const input=document.querySelector('#name');input.value='';input.focus()})()",
+        )
+        .unwrap();
+    engine
+        .handle_rpc(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "ego.type",
+                "params": { "tab": tab.0, "text": "Servo" },
+            })
+            .to_string(),
+        )
+        .expect("type response");
+    assert_eq!(
+        engine
+            .evaluate(tab, "document.querySelector('#name').value")
+            .unwrap(),
+        serde_json::Value::String("Servo".into())
+    );
 
     // Navigation, puis retour : le modèle suit ce que le moteur annonce.
     engine.navigate(tab, &page("00ff00", "two")).unwrap();

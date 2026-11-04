@@ -187,7 +187,11 @@ fn preload_and_top_level_frame_traversal() {
     );
     let (origin, _) = serve(vec![("/top", top_body)]);
 
-    let mut engine = Engine::new(EngineConfig { viewport: VIEWPORT }).expect("moteur");
+    let mut engine = Engine::new(EngineConfig {
+        viewport: VIEWPORT,
+        ..EngineConfig::default()
+    })
+    .expect("moteur");
     engine.install_preload(PRELOAD);
     let space = engine.create_space("preload", ProfileId("default".into()));
     let tab = engine
