@@ -12088,6 +12088,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "webview-bridge"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tungstenite",
+ "webview-core",
+]
+
+[[package]]
+name = "webview-core"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "webview-engine"
+version = "0.7.0"
+dependencies = [
+ "base64 0.23.1",
+ "dirs",
+ "dpi",
+ "euclid",
+ "image",
+ "serde",
+ "serde_json",
+ "servo",
+ "servo-embedder-traits",
+ "servo-paint-api",
+ "url",
+ "webview-bridge",
+ "webview-core",
+]
+
+[[package]]
 name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
