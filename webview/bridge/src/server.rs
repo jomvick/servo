@@ -160,4 +160,12 @@ mod tests {
         assert!(!authorized(&wrong_scheme, "secret"));
         assert!(!authorized(&valid, "other"));
     }
+
+    #[test]
+    fn binding_port_zero_selects_an_available_loopback_port() {
+        let listener = bind(0).expect("bind an ephemeral loopback port");
+        let address = listener.local_addr().expect("read listener address");
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+    }
 }

@@ -25,10 +25,10 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use paint_api::rendering_context::{RenderingContext, SoftwareRenderingContext};
 use serde_json::{Map, Value, json};
 use servo::{
-    DeviceIntRect, DevicePoint, InputEvent, JSValue, JavaScriptEvaluationError, Key, KeyState,
-    KeyboardEvent, MouseButton, MouseButtonAction, MouseButtonEvent, MouseMoveEvent, Servo,
-    ServoBuilder, UserContentManager, UserScript, WebView, WebViewBuilder, WheelDelta, WheelEvent,
-    WheelMode,
+    DeviceIntRect, DevicePoint, InputEvent, InputEventId, InputEventResult, JSValue,
+    JavaScriptEvaluationError, Key, KeyState, KeyboardEvent, MouseButton, MouseButtonAction,
+    MouseButtonEvent, MouseMoveEvent, Servo, ServoBuilder, UserContentManager, UserScript, WebView,
+    WebViewBuilder, WheelDelta, WheelEvent, WheelMode,
 };
 use url::Url;
 use webview_bridge::protocol::{Call, ErrorObject, Reply, Request};
@@ -93,6 +93,7 @@ struct Tab {
     webview: WebView,
     context: Rc<dyn RenderingContext>,
     dirty: Rc<Cell<bool>>,
+    input_results: Rc<RefCell<HashMap<InputEventId, Option<InputEventResult>>>>,
 }
 
 pub struct Engine {
@@ -154,10 +155,12 @@ impl Engine {
         let context = rendering_context((width, height))?;
         let tab = self.registry.create_tab(space, url.map(str::to_owned))?;
         let dirty = Rc::new(Cell::new(false));
+        let input_results = Rc::new(RefCell::new(HashMap::new()));
         let delegate = Rc::new(TabDelegate {
             tab,
             dirty: dirty.clone(),
             events: self.events.clone(),
+            input_results: input_results.clone(),
         });
         let mut builder = WebViewBuilder::new(&self.servo, context.clone())
             .delegate(delegate)
@@ -174,6 +177,7 @@ impl Engine {
                 webview,
                 context,
                 dirty,
+                input_results,
             },
         );
         Ok(tab)
@@ -207,6 +211,64 @@ impl Engine {
         Ok(())
     }
 
+    fn input_and_wait(&mut self, tab: TabId, event: InputEvent) -> Result<(), EgoError> {
+        let webview = self.webview(tab)?;
+        let input_results = self.entry(tab)?.input_results.clone();
+        let id = webview.notify_input_event(event);
+        input_results.borrow_mut().insert(id, None);
+        self.wait_for_input_events(input_results, &[id], "input")
+    }
+
+    fn wait_for_input_events(
+        &mut self,
+        input_results: Rc<RefCell<HashMap<InputEventId, Option<InputEventResult>>>>,
+        ids: &[InputEventId],
+        event_name: &str,
+    ) -> Result<(), EgoError> {
+        let started = Instant::now();
+        loop {
+            self.pump();
+            let outcomes = {
+                let mut results = input_results.borrow_mut();
+                if ids
+                    .iter()
+                    .all(|id| results.get(id).is_some_and(Option::is_some))
+                {
+                    Some(
+                        ids.iter()
+                            .filter_map(|id| results.remove(id).flatten())
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                }
+            };
+            if let Some(outcomes) = outcomes {
+                if outcomes
+                    .iter()
+                    .any(|result| result.contains(InputEventResult::DispatchFailed))
+                {
+                    return Err(EgoError::new(
+                        ErrorCode::OperationFailed,
+                        format!("{event_name} event failed to dispatch"),
+                    ));
+                }
+                return Ok(());
+            }
+            if started.elapsed() >= EVALUATE_TIMEOUT {
+                let mut results = input_results.borrow_mut();
+                for id in ids {
+                    results.remove(id);
+                }
+                return Err(EgoError::new(
+                    ErrorCode::OperationFailed,
+                    format!("{event_name} input timed out after {EVALUATE_TIMEOUT:?}"),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     pub fn click_at(&mut self, tab: TabId, x: f32, y: f32) -> Result<(), EgoError> {
         let size = self.entry(tab)?.context.size();
         if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
@@ -222,26 +284,29 @@ impl Engine {
             ));
         }
         let point = DevicePoint::new(x, y);
-        self.input(
-            tab,
-            InputEvent::MouseMove(MouseMoveEvent::new(point.into())),
-        )?;
-        self.input(
-            tab,
-            InputEvent::MouseButton(MouseButtonEvent::new(
+        let webview = self.webview(tab)?;
+        let input_results = self.entry(tab)?.input_results.clone();
+        let ids = [
+            webview.notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(point.into()))),
+            webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Down,
                 MouseButton::Primary,
                 point.into(),
-            )),
-        )?;
-        self.input(
-            tab,
-            InputEvent::MouseButton(MouseButtonEvent::new(
+            ))),
+            webview.notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                 MouseButtonAction::Up,
                 MouseButton::Primary,
                 point.into(),
-            )),
-        )
+            ))),
+        ];
+        {
+            let mut results = input_results.borrow_mut();
+            for id in ids {
+                results.insert(id, None);
+            }
+        }
+
+        self.wait_for_input_events(input_results, &ids, "pointer")
     }
 
     /// Enregistrer le preload agent sur le `UserContentManager` partagé. À appeler **avant**
@@ -437,14 +502,14 @@ impl Engine {
                 self.require_agent_control_for_tab(tab)?;
                 for character in text.chars() {
                     let key = Key::Character(character.to_string());
-                    self.input(
+                    self.input_and_wait(
                         tab,
                         InputEvent::Keyboard(KeyboardEvent::from_state_and_key(
                             KeyState::Down,
                             key.clone(),
                         )),
                     )?;
-                    self.input(
+                    self.input_and_wait(
                         tab,
                         InputEvent::Keyboard(KeyboardEvent::from_state_and_key(KeyState::Up, key)),
                     )?;

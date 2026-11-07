@@ -35,10 +35,14 @@ the UI thread; retired GPUI image tiles are evicted as frames advance.
 
 The CLI starts the daemon with a cryptographically random token and a loopback-
 only WebSocket JSON-RPC server. The server authenticates every connection and
-dispatches `ego.*` calls on Servo's owning thread. `SERVO_WEBVIEW_PORT` selects
-the port (default `9239`); `SERVO_WEBVIEW_TOKEN` can supply a token instead of
-letting the CLI generate one. The listener is not exposed on non-loopback
-interfaces.
+dispatches `ego.*` calls on Servo's owning thread. It binds an ephemeral port by
+default (`SERVO_WEBVIEW_PORT=0`) and prints
+`SERVO_WEBVIEW_READY ws://127.0.0.1:<port>` to stdout once ready. The CLI waits
+for this signal instead of assuming a fixed port. `SERVO_WEBVIEW_PORT` can
+select a fixed port; `SERVO_WEBVIEW_TOKEN` can supply a token instead of letting
+the CLI generate one. Spaces and tabs are created through `ego.createTaskSpace`
+and `ego.createTab`, not implicitly by the daemon. The listener is not exposed
+on non-loopback interfaces.
 
 ```sh
 SERVO_WEBVIEW_PORT=9239 cargo run --manifest-path webview/Cargo.toml -p webview-cli -- https://example.com

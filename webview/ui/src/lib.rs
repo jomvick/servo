@@ -1,6 +1,8 @@
 use std::env;
+use std::io::{BufRead, BufReader};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::process::Command as ProcessCommand;
+use std::process::{Child, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
@@ -24,7 +26,6 @@ type RpcSocket = WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStre
 pub struct BrowserConfig {
     pub endpoint: String,
     pub token: String,
-    pub tab: u64,
 }
 
 enum Command {
@@ -331,6 +332,24 @@ fn run_client(
     let result = (|| {
         let mut socket = connect(&config)?;
         let mut next_id = 1;
+        let space = rpc_call(
+            &mut socket,
+            &mut next_id,
+            "ego.createTaskSpace",
+            json!({ "name": "Browser" }),
+        )?
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or("createTaskSpace response did not contain a space id")?;
+        let tab = rpc_call(
+            &mut socket,
+            &mut next_id,
+            "ego.createTab",
+            json!({ "space": space, "url": initial_url }),
+        )?
+        .get("id")
+        .and_then(Value::as_u64)
+        .ok_or("createTab response did not contain a tab id")?;
         let mut next_capture = Instant::now();
         loop {
             match commands.recv_timeout(Duration::from_millis(10)) {
@@ -339,7 +358,7 @@ fn run_client(
                         &mut socket,
                         &mut next_id,
                         "ego.goBack",
-                        json!({ "tab": config.tab }),
+                        json!({ "tab": tab }),
                     )?;
                 },
                 Ok(Command::Forward) => {
@@ -347,7 +366,7 @@ fn run_client(
                         &mut socket,
                         &mut next_id,
                         "ego.goForward",
-                        json!({ "tab": config.tab }),
+                        json!({ "tab": tab }),
                     )?;
                 },
                 Ok(Command::Reload) => {
@@ -355,7 +374,7 @@ fn run_client(
                         &mut socket,
                         &mut next_id,
                         "ego.reload",
-                        json!({ "tab": config.tab }),
+                        json!({ "tab": tab }),
                     )?;
                 },
                 Ok(Command::Click { x, y }) => {
@@ -363,7 +382,7 @@ fn run_client(
                         &mut socket,
                         &mut next_id,
                         "ego.clickAt",
-                        json!({ "tab": config.tab, "x": x, "y": y }),
+                        json!({ "tab": tab, "x": x, "y": y }),
                     )?;
                 },
                 Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -374,7 +393,7 @@ fn run_client(
                     &mut socket,
                     &mut next_id,
                     "ego.capture",
-                    json!({ "tab": config.tab }),
+                    json!({ "tab": tab }),
                 ) {
                     Ok(capture) => capture,
                     Err(error) => {
@@ -432,16 +451,17 @@ pub fn run(url: String) -> Result<(), String> {
         },
     };
     let port = env::var("SERVO_WEBVIEW_PORT")
-        .unwrap_or_else(|_| "9239".into())
+        .unwrap_or_else(|_| "0".into())
         .parse::<u16>()
         .map_err(|error| format!("invalid SERVO_WEBVIEW_PORT: {error}"))?;
     let profile = dirs::data_local_dir().map(|path| path.join("servo-webview"));
     let engine = engine_executable();
     let mut child = ProcessCommand::new(&engine)
-        .arg(&url)
         .env("SERVO_WEBVIEW_TOKEN", &token)
         .env("SERVO_WEBVIEW_PORT", port.to_string())
         .envs(profile.iter().map(|path| ("SERVO_WEBVIEW_PROFILE", path)))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|error| {
             format!(
@@ -449,6 +469,14 @@ pub fn run(url: String) -> Result<(), String> {
                 engine.display()
             )
         })?;
+    let endpoint = match child.stdout.take() {
+        Some(stdout) => wait_for_ready(&mut child, stdout)?,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("engine stdout was not available for its ready signal".into());
+        },
+    };
 
     let app = gpui_platform::application();
     app.run(move |cx: &mut App| {
@@ -463,9 +491,8 @@ pub fn run(url: String) -> Result<(), String> {
                     BrowserView::with_config(
                         url.clone(),
                         BrowserConfig {
-                            endpoint: format!("ws://127.0.0.1:{port}"),
+                            endpoint: endpoint.clone(),
                             token: token.clone(),
-                            tab: 1,
                         },
                         cx,
                     )
@@ -477,6 +504,76 @@ pub fn run(url: String) -> Result<(), String> {
     let _ = child.kill();
     let _ = child.wait();
     Ok(())
+}
+
+fn wait_for_ready(child: &mut Child, stdout: ChildStdout) -> Result<String, String> {
+    let (ready_tx, ready_rx) = mpsc::channel();
+    if let Err(error) = thread::Builder::new()
+        .name("webview-engine-ready".into())
+        .spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout)
+                .read_line(&mut line)
+                .map(|bytes| (bytes, line));
+            let _ = ready_tx.send(result);
+        })
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("failed to wait for engine readiness: {error}"));
+    }
+
+    let line = match ready_rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(Ok((0, _))) => {
+            let status = child.try_wait().ok().flatten();
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "Servo engine exited before readiness (status: {status:?})"
+            ));
+        },
+        Ok(Ok((_, line))) => line,
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to read engine readiness: {error}"));
+        },
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Servo engine did not become ready within 60 seconds".into());
+        },
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("engine readiness reader stopped unexpectedly".into());
+        },
+    };
+    match ready_endpoint(&line) {
+        Ok(endpoint) => Ok(endpoint),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        },
+    }
+}
+
+fn ready_endpoint(line: &str) -> Result<String, String> {
+    let endpoint = line
+        .trim()
+        .strip_prefix("SERVO_WEBVIEW_READY ")
+        .ok_or_else(|| format!("unexpected engine readiness signal: {}", line.trim()))?;
+    let address = endpoint
+        .strip_prefix("ws://")
+        .and_then(|address| address.parse::<SocketAddr>().ok())
+        .ok_or_else(|| format!("invalid engine endpoint in readiness signal: {endpoint}"))?;
+    if address.ip() != IpAddr::V4(Ipv4Addr::LOCALHOST) || address.port() == 0 {
+        return Err(format!(
+            "engine readiness endpoint must use an assigned loopback port: {endpoint}"
+        ));
+    }
+    Ok(endpoint.to_owned())
 }
 
 fn engine_executable() -> PathBuf {
@@ -511,4 +608,20 @@ fn random_token() -> Result<String, String> {
         token.push(HEX[(byte & 0x0f) as usize] as char);
     }
     Ok(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_signal_requires_an_assigned_loopback_endpoint() {
+        assert_eq!(
+            ready_endpoint("SERVO_WEBVIEW_READY ws://127.0.0.1:49152\n").unwrap(),
+            "ws://127.0.0.1:49152"
+        );
+        assert!(ready_endpoint("SERVO_WEBVIEW_READY ws://127.0.0.1:0\n").is_err());
+        assert!(ready_endpoint("SERVO_WEBVIEW_READY ws://0.0.0.0:49152\n").is_err());
+        assert!(ready_endpoint("READY ws://127.0.0.1:49152\n").is_err());
+    }
 }

@@ -1,22 +1,22 @@
 //! Ce que le moteur annonce pour un onglet, traduit en événements de la couche navigateur.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
-use servo::{LoadStatus, WebView, WebViewDelegate};
+use servo::{InputEventId, InputEventResult, LoadStatus, WebView, WebViewDelegate};
 use url::Url;
 use webview_core::TabId;
 
 use crate::EngineEvent;
 
-#[derive(Debug)]
 pub(crate) struct TabDelegate {
     pub(crate) tab: TabId,
     /// Posé par la notification de frame, lu par `Engine::pump`. Le delegate ne peint jamais :
     /// voir la note de D5, peindre ici consommerait la frame sale que l'embeddeur voulait rendre.
     pub(crate) dirty: Rc<Cell<bool>>,
     pub(crate) events: Rc<RefCell<VecDeque<EngineEvent>>>,
+    pub(crate) input_results: Rc<RefCell<HashMap<InputEventId, Option<InputEventResult>>>>,
 }
 
 impl TabDelegate {
@@ -60,5 +60,16 @@ impl WebViewDelegate for TabDelegate {
             tab: self.tab,
             reason,
         });
+    }
+
+    fn notify_input_event_handled(
+        &self,
+        _webview: WebView,
+        event_id: InputEventId,
+        result: InputEventResult,
+    ) {
+        if let Some(result_slot) = self.input_results.borrow_mut().get_mut(&event_id) {
+            *result_slot = Some(result);
+        }
     }
 }
